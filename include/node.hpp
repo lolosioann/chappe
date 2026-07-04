@@ -7,6 +7,7 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -186,6 +187,31 @@ public:
   }
 
   bool bridged() const noexcept { return bridge_ != nullptr; }
+
+  // ---- get/set (replicated latest-value store) ------------------------------
+  // set<T> writes a local copy of `key` and replicates it to the bridged peer;
+  // get<T> reads the local replica (nullopt if never set/received). Eventually
+  // consistent, last-writer-wins per key. Requires an established bridge.
+
+  template <typename T> void set(const std::string &key, const T &val) {
+    if (!bridge_)
+      throw std::logic_error("set: no bridge established");
+    std::vector<char> bytes;
+    ipc::wire_codec<T>::encode(val, bytes);
+    bridge_->kv_set(key, std::move(bytes));
+  }
+
+  template <typename T> std::optional<T> get(const std::string &key) {
+    if (!bridge_)
+      throw std::logic_error("get: no bridge established");
+    auto bytes = bridge_->kv_get(key);
+    if (!bytes)
+      return std::nullopt;
+    T out;
+    if (!ipc::wire_codec<T>::decode(bytes->data(), bytes->size(), out))
+      return std::nullopt;
+    return out;
+  }
 
   // drain the thread pool — useful in tests to wait for async handlers
   void drain() {

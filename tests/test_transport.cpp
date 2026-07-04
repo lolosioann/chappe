@@ -7,8 +7,10 @@
 #include <condition_variable>
 #include <cstring>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <sys/socket.h>
+#include <thread>
 #include <vector>
 
 // ---- Messages --------------------------------------------------------------
@@ -200,9 +202,63 @@ void test_node_bridge() {
   ASSERT_EQ(s.at(0).value, 7);
 }
 
+// Replicated get/set: set on one node, get on the bridged peer after the
+// update propagates; local get is immediate; unknown key is nullopt.
+void test_kv_replicated() {
+  int sv[2];
+  ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+
+  Bus ba, bb;
+  Node<Cmd, Imu, Flag, Samples, Pose, Ack> na("a", ba);
+  Node<Cmd, Imu, Flag, Samples, Pose, Ack> nb("b", bb);
+  na.bridge_attach(sv[0]);
+  nb.bridge_attach(sv[1]);
+
+  na.set<float>("target_speed", 3.5f);
+  na.set<std::string>("mode", "race");
+
+  auto local = na.get<float>("target_speed"); // setter sees its own value now
+  ASSERT_TRUE(local.has_value());
+  ASSERT_EQ(*local, 3.5f);
+
+  std::optional<float> rf;
+  for (int i = 0; i < 200 && !rf.has_value(); i++) {
+    rf = nb.get<float>("target_speed");
+    if (!rf)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  ASSERT_TRUE(rf.has_value());
+  ASSERT_EQ(*rf, 3.5f);
+
+  std::optional<std::string> rs;
+  for (int i = 0; i < 200 && !rs.has_value(); i++) {
+    rs = nb.get<std::string>("mode");
+    if (!rs)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  ASSERT_TRUE(rs.has_value());
+  ASSERT_EQ(*rs, std::string("race"));
+
+  ASSERT_TRUE(!nb.get<int32_t>("nope").has_value()); // unknown key
+}
+
+void test_kv_requires_bridge() {
+  Bus b;
+  Node<Cmd, Imu, Flag, Samples, Pose, Ack> n("lone", b);
+  bool threw = false;
+  try {
+    n.set<int32_t>("k", 1);
+  } catch (const std::logic_error &) {
+    threw = true;
+  }
+  ASSERT_TRUE(threw);
+}
+
 int main() {
   test_case("transport carries pod/list/string/composite", test_transport_types);
   test_case("bidirectional forward does not echo", test_transport_no_echo);
   test_case("node-level bridge api", test_node_bridge);
+  test_case("replicated get/set store", test_kv_replicated);
+  test_case("get/set requires a bridge", test_kv_requires_bridge);
   return test_summary();
 }

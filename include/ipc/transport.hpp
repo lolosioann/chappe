@@ -6,6 +6,7 @@
 #include <cstring>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <type_traits>
@@ -148,11 +149,34 @@ public:
         return; // don't echo the very topic we just injected from the wire
       std::vector<char> payload;
       wire_codec<T>::encode(msg, payload);
-      send_frame(Topic<T>::name, payload);
+      send_frame(KIND_PUBSUB, Topic<T>::name, payload);
     }));
   }
 
+  // Replicated latest-value store. kv_set writes a local copy and pushes it to
+  // the peer; the peer applies it to its own store (no re-broadcast, so no
+  // echo). kv_get reads the local replica. Last-writer-wins per key; values set
+  // before a peer connects are not back-filled to it.
+  void kv_set(const std::string &key, std::vector<char> bytes) {
+    {
+      std::lock_guard<std::mutex> lk(kv_mu_);
+      kv_[key] = bytes;
+    }
+    send_frame(KIND_KV, key, bytes);
+  }
+
+  std::optional<std::vector<char>> kv_get(const std::string &key) {
+    std::lock_guard<std::mutex> lk(kv_mu_);
+    auto it = kv_.find(key);
+    if (it == kv_.end())
+      return std::nullopt;
+    return it->second;
+  }
+
 private:
+  static constexpr uint8_t KIND_PUBSUB = 0;
+  static constexpr uint8_t KIND_KV = 1;
+
   template <typename T> void register_receiver() {
     if constexpr (Topic<T>::name != nullptr) {
       receivers_[Topic<T>::name] = [this](const char *data, size_t n) {
@@ -170,13 +194,16 @@ private:
     }
   }
 
-  void send_frame(const char *topic, const std::vector<char> &payload) {
-    uint32_t tlen = static_cast<uint32_t>(std::strlen(topic));
+  // Frame: [u8 kind][u32 name_len][name][u32 payload_len][payload].
+  void send_frame(uint8_t kind, const std::string &name,
+                  const std::vector<char> &payload) {
+    uint32_t nlen = static_cast<uint32_t>(name.size());
     uint32_t plen = static_cast<uint32_t>(payload.size());
     std::vector<char> buf;
-    buf.reserve(8 + tlen + plen);
-    append_u32(buf, tlen);
-    buf.insert(buf.end(), topic, topic + tlen);
+    buf.reserve(1 + 8 + nlen + plen);
+    buf.push_back(static_cast<char>(kind));
+    append_u32(buf, nlen);
+    buf.insert(buf.end(), name.begin(), name.end());
     append_u32(buf, plen);
     buf.insert(buf.end(), payload.begin(), payload.end());
     std::lock_guard<std::mutex> lk(send_mu_);
@@ -185,20 +212,28 @@ private:
 
   void read_loop() {
     while (running_.load()) {
-      uint32_t tlen, plen;
-      if (!read_u32(tlen))
+      char kind;
+      if (!read_full(&kind, 1))
         break;
-      std::string topic(tlen, '\0');
-      if (tlen && !read_full(&topic[0], tlen))
+      uint32_t nlen, plen;
+      if (!read_u32(nlen))
+        break;
+      std::string name(nlen, '\0');
+      if (nlen && !read_full(&name[0], nlen))
         break;
       if (!read_u32(plen))
         break;
       std::vector<char> payload(plen);
       if (plen && !read_full(payload.data(), plen))
         break;
-      auto it = receivers_.find(topic);
-      if (it != receivers_.end())
-        it->second(payload.data(), plen);
+      if (static_cast<uint8_t>(kind) == KIND_KV) {
+        std::lock_guard<std::mutex> lk(kv_mu_);
+        kv_[name] = std::move(payload); // apply replica, do not re-broadcast
+      } else {
+        auto it = receivers_.find(name);
+        if (it != receivers_.end())
+          it->second(payload.data(), plen);
+      }
     }
   }
 
@@ -254,6 +289,8 @@ private:
   std::atomic<bool> running_{true};
   std::unordered_map<std::string, std::function<void(const char *, size_t)>>
       receivers_;
+  std::unordered_map<std::string, std::vector<char>> kv_;
+  std::mutex kv_mu_;
   std::vector<SubscriptionGuard> guards_;
   std::thread reader_;
 };
