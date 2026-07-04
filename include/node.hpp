@@ -2,6 +2,7 @@
 #include "broker.hpp"
 #include "ipc/frame_handle.hpp"
 #include "ipc/shm_ring.hpp"
+#include "ipc/transport.hpp"
 #include "threadpool.hpp"
 #include <atomic>
 #include <functional>
@@ -22,7 +23,10 @@ template <typename... Topics> class Node {
   std::unique_ptr<std::atomic<uint64_t>> frame_drops_ =
       std::make_unique<std::atomic<uint64_t>>(0);
   std::unique_ptr<ThreadPool> pool_;      // destroyed after guards_
-  std::vector<SubscriptionGuard> guards_; // destroyed first
+  std::vector<SubscriptionGuard> guards_; // destroyed before pool_
+  // Declared last -> destroyed first: the bridge's reader thread stops
+  // publishing into the broker before the rest of the node tears down.
+  std::unique_ptr<ipc::SocketBridge<Topics...>> bridge_;
 
 public:
   Node(std::string name, Broker<Topics...> &broker, size_t threads = 0)
@@ -145,6 +149,44 @@ public:
     return frame_drops_->load(std::memory_order_relaxed);
   }
 
+  // ---- socket bridge API ----------------------------------------------------
+  // Bridge this node's broker to a peer process over a stream socket. Topics
+  // registered with bridge_forward<T>() are serialized to the peer; any named
+  // topic arriving from the peer is published into this node's broker. One
+  // bridge per node.
+
+  // Attach an already-connected stream socket (Unix or TCP). Takes ownership.
+  void bridge_attach(int fd) { set_bridge(fd); }
+
+  // Connect to a peer already listening on `path`.
+  void bridge_connect(const std::string &path) {
+    int fd = ipc::unix_connect(path);
+    if (fd < 0)
+      throw std::runtime_error("bridge_connect failed for '" + path + "'");
+    set_bridge(fd);
+  }
+
+  // Listen on `path` and block until one peer connects.
+  void bridge_listen(const std::string &path) {
+    int lfd = ipc::unix_listen(path);
+    if (lfd < 0)
+      throw std::runtime_error("bridge_listen failed for '" + path + "'");
+    int fd = ipc::unix_accept(lfd);
+    ::close(lfd);
+    if (fd < 0)
+      throw std::runtime_error("bridge_accept failed for '" + path + "'");
+    set_bridge(fd);
+  }
+
+  // Forward local publishes of topic T to the bridged peer.
+  template <typename T> void bridge_forward() {
+    if (!bridge_)
+      throw std::logic_error("bridge_forward: no bridge established");
+    bridge_->template forward<T>();
+  }
+
+  bool bridged() const noexcept { return bridge_ != nullptr; }
+
   // drain the thread pool — useful in tests to wait for async handlers
   void drain() {
     if (pool_)
@@ -164,5 +206,14 @@ private:
   }
   void record_frame_drop() noexcept {
     frame_drops_->fetch_add(1, std::memory_order_relaxed);
+  }
+  void set_bridge(int fd) {
+    if (fd < 0)
+      throw std::runtime_error("bridge: invalid socket fd");
+    if (bridge_) {
+      ::close(fd);
+      throw std::logic_error("node already has a bridge");
+    }
+    bridge_ = std::make_unique<ipc::SocketBridge<Topics...>>(broker_, fd);
   }
 };

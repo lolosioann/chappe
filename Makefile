@@ -39,9 +39,9 @@ $(BINDIR)/test_frame_ipc: tests/test_frame_ipc.cpp $(NODE_DEPS) include/test.hpp
 	@mkdir -p $(BINDIR)
 	$(CXX) $(CXXFLAGS) $< $(BINDIR)/shm_ring.o -o $@ -lrt
 
-$(BINDIR)/test_transport: tests/test_transport.cpp include/broker.hpp include/ipc/transport.hpp include/test.hpp
+$(BINDIR)/test_transport: tests/test_transport.cpp $(NODE_DEPS) include/ipc/transport.hpp include/test.hpp $(BINDIR)/shm_ring.o
 	@mkdir -p $(BINDIR)
-	$(CXX) $(CXXFLAGS) $< -o $@
+	$(CXX) $(CXXFLAGS) $< $(BINDIR)/shm_ring.o -o $@ -lrt
 
 # ---- run individual test suites --------------------------------------------
 

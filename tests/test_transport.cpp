@@ -1,6 +1,7 @@
 // tests/test_transport.cpp
 #include "broker.hpp"
 #include "ipc/transport.hpp"
+#include "node.hpp"
 #include "test.hpp"
 #include <chrono>
 #include <condition_variable>
@@ -177,8 +178,31 @@ void test_transport_no_echo() {
   ASSERT_EQ(a_cmd, 1); // no echo of Cmd looped back to A
 }
 
+// Node-level API: bridge_attach + bridge_forward, driven through Node::publish
+// and Node::subscribe rather than a raw Broker + SocketBridge.
+void test_node_bridge() {
+  int sv[2];
+  ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+
+  Bus ba, bb;
+  Node<Cmd, Imu, Flag, Samples, Pose, Ack> na("a", ba);
+  Node<Cmd, Imu, Flag, Samples, Pose, Ack> nb("b", bb);
+  na.bridge_attach(sv[0]);
+  nb.bridge_attach(sv[1]);
+  ASSERT_TRUE(na.bridged());
+  na.bridge_forward<Cmd>();
+
+  Sink<Cmd> s;
+  nb.subscribe([&](const Cmd &c) { s.push(c); });
+
+  na.publish(Cmd{7});
+  ASSERT_TRUE(s.wait_count(1));
+  ASSERT_EQ(s.at(0).value, 7);
+}
+
 int main() {
   test_case("transport carries pod/list/string/composite", test_transport_types);
   test_case("bidirectional forward does not echo", test_transport_no_echo);
+  test_case("node-level bridge api", test_node_bridge);
   return test_summary();
 }
