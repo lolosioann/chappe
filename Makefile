@@ -1,5 +1,7 @@
 CXX      := g++
 CXXFLAGS := -std=c++17 -pthread -Wall -Wextra -Iinclude
+CC       := cc
+CFLAGS   := -std=c11 -pthread -Wall -Wextra -Iinclude
 BINDIR   := bin
 
 # ---- targets ---------------------------------------------------------------
@@ -8,7 +10,7 @@ ALL_TESTS := $(BINDIR)/test_broker $(BINDIR)/test_threadpool $(BINDIR)/test_node
 ALL_EXAMPLES := $(BINDIR)/basic
 
 .PHONY: all test examples clean \
-        test_broker test_threadpool test_node
+        test_broker test_threadpool test_node test_shm_ring stress_shm_ring bench_shm_ring
 
 all: test examples
 
@@ -52,6 +54,35 @@ test: $(ALL_TESTS)
 	else \
 		echo "one or more suites failed"; exit 1; \
 	fi
+
+# ---- shm_ring (C) ----------------------------------------------------------
+
+# Object for linking into C++ consumers (via the extern "C" header).
+$(BINDIR)/shm_ring.o: src/shm_ring.c include/shm_ring.h
+	@mkdir -p $(BINDIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BINDIR)/test_shm_ring: src/shm_ring.c include/shm_ring.h
+	@mkdir -p $(BINDIR)
+	$(CC) $(CFLAGS) -DSHM_RING_TEST $< -o $@ -lrt
+
+test_shm_ring: $(BINDIR)/test_shm_ring
+	@echo "\n========== test_shm_ring =========="; ./$(BINDIR)/test_shm_ring
+
+# Fork-based concurrency stress test (-O2: real reordering pressure).
+$(BINDIR)/stress_shm_ring: tests/stress_shm_ring.c src/shm_ring.c include/shm_ring.h
+	@mkdir -p $(BINDIR)
+	$(CC) $(CFLAGS) -O2 tests/stress_shm_ring.c src/shm_ring.c -o $@ -lrt
+
+stress_shm_ring: $(BINDIR)/stress_shm_ring
+	@echo "\n========== stress_shm_ring =========="; ./$(BINDIR)/stress_shm_ring
+
+$(BINDIR)/bench_shm_ring: tests/bench_shm_ring.c src/shm_ring.c include/shm_ring.h
+	@mkdir -p $(BINDIR)
+	$(CC) $(CFLAGS) -O2 tests/bench_shm_ring.c src/shm_ring.c -o $@ -lrt
+
+bench_shm_ring: $(BINDIR)/bench_shm_ring
+	@echo "\n========== bench_shm_ring =========="; ./$(BINDIR)/bench_shm_ring
 
 # ---- examples --------------------------------------------------------------
 
