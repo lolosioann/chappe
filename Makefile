@@ -4,13 +4,20 @@ CC       := cc
 CFLAGS   := -std=c11 -pthread -Wall -Wextra -Iinclude
 BINDIR   := bin
 
+# node.hpp pulls in the shm ring (frame API), so anything using Node depends on
+# these headers and must link shm_ring.o.
+NODE_DEPS := include/node.hpp include/broker.hpp include/threadpool.hpp \
+             include/ipc/shm_ring.hpp include/ipc/frame_handle.hpp include/shm_ring.h
+
 # ---- targets ---------------------------------------------------------------
 
-ALL_TESTS := $(BINDIR)/test_broker $(BINDIR)/test_threadpool $(BINDIR)/test_node
+ALL_TESTS := $(BINDIR)/test_broker $(BINDIR)/test_threadpool $(BINDIR)/test_node \
+             $(BINDIR)/test_frame_ipc
 ALL_EXAMPLES := $(BINDIR)/basic
 
 .PHONY: all test examples clean \
-        test_broker test_threadpool test_node test_shm_ring stress_shm_ring bench_shm_ring
+        test_broker test_threadpool test_node test_frame_ipc \
+        test_shm_ring stress_shm_ring bench_shm_ring
 
 all: test examples
 
@@ -24,9 +31,13 @@ $(BINDIR)/test_threadpool: tests/test_threadpool.cpp include/threadpool.hpp incl
 	@mkdir -p $(BINDIR)
 	$(CXX) $(CXXFLAGS) $< -o $@
 
-$(BINDIR)/test_node: tests/test_node.cpp include/node.hpp include/broker.hpp include/threadpool.hpp include/test.hpp
+$(BINDIR)/test_node: tests/test_node.cpp $(NODE_DEPS) include/test.hpp $(BINDIR)/shm_ring.o
 	@mkdir -p $(BINDIR)
-	$(CXX) $(CXXFLAGS) $< -o $@
+	$(CXX) $(CXXFLAGS) $< $(BINDIR)/shm_ring.o -o $@ -lrt
+
+$(BINDIR)/test_frame_ipc: tests/test_frame_ipc.cpp $(NODE_DEPS) include/test.hpp $(BINDIR)/shm_ring.o
+	@mkdir -p $(BINDIR)
+	$(CXX) $(CXXFLAGS) $< $(BINDIR)/shm_ring.o -o $@ -lrt
 
 # ---- run individual test suites --------------------------------------------
 
@@ -39,6 +50,9 @@ test_threadpool: $(BINDIR)/test_threadpool
 test_node: $(BINDIR)/test_node
 	@echo "\n========== test_node =========="; ./$(BINDIR)/test_node
 
+test_frame_ipc: $(BINDIR)/test_frame_ipc
+	@echo "\n========== test_frame_ipc =========="; ./$(BINDIR)/test_frame_ipc
+
 # ---- run all tests ---------------------------------------------------------
 
 test: $(ALL_TESTS)
@@ -48,8 +62,10 @@ test: $(ALL_TESTS)
 	./$(BINDIR)/test_threadpool;   status2=$$?; \
 	echo "\n========== test_node =========="; \
 	./$(BINDIR)/test_node;         status3=$$?; \
+	echo "\n========== test_frame_ipc =========="; \
+	./$(BINDIR)/test_frame_ipc;    status4=$$?; \
 	echo "\n========== summary =========="; \
-	if [ $$status1 -eq 0 ] && [ $$status2 -eq 0 ] && [ $$status3 -eq 0 ]; then \
+	if [ $$status1 -eq 0 ] && [ $$status2 -eq 0 ] && [ $$status3 -eq 0 ] && [ $$status4 -eq 0 ]; then \
 		echo "all suites passed"; exit 0; \
 	else \
 		echo "one or more suites failed"; exit 1; \
@@ -86,9 +102,9 @@ bench_shm_ring: $(BINDIR)/bench_shm_ring
 
 # ---- examples --------------------------------------------------------------
 
-$(BINDIR)/basic: examples/basic.cpp include/broker.hpp include/node.hpp include/threadpool.hpp
+$(BINDIR)/basic: examples/basic.cpp $(NODE_DEPS) $(BINDIR)/shm_ring.o
 	@mkdir -p $(BINDIR)
-	$(CXX) $(CXXFLAGS) $< -o $@
+	$(CXX) $(CXXFLAGS) $< $(BINDIR)/shm_ring.o -o $@ -lrt
 
 examples: $(BINDIR)/basic
 	@echo "\n========== basic example =========="; ./$(BINDIR)/basic
