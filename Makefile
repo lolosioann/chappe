@@ -12,11 +12,11 @@ NODE_DEPS := include/node.hpp include/broker.hpp include/threadpool.hpp \
 # ---- targets ---------------------------------------------------------------
 
 ALL_TESTS := $(BINDIR)/test_broker $(BINDIR)/test_threadpool $(BINDIR)/test_node \
-             $(BINDIR)/test_frame_ipc
+             $(BINDIR)/test_frame_ipc $(BINDIR)/test_transport
 ALL_EXAMPLES := $(BINDIR)/basic
 
 .PHONY: all test examples clean \
-        test_broker test_threadpool test_node test_frame_ipc \
+        test_broker test_threadpool test_node test_frame_ipc test_transport \
         test_shm_ring stress_shm_ring bench_shm_ring
 
 all: test examples
@@ -39,6 +39,10 @@ $(BINDIR)/test_frame_ipc: tests/test_frame_ipc.cpp $(NODE_DEPS) include/test.hpp
 	@mkdir -p $(BINDIR)
 	$(CXX) $(CXXFLAGS) $< $(BINDIR)/shm_ring.o -o $@ -lrt
 
+$(BINDIR)/test_transport: tests/test_transport.cpp include/broker.hpp include/ipc/transport.hpp include/test.hpp
+	@mkdir -p $(BINDIR)
+	$(CXX) $(CXXFLAGS) $< -o $@
+
 # ---- run individual test suites --------------------------------------------
 
 test_broker: $(BINDIR)/test_broker
@@ -53,6 +57,9 @@ test_node: $(BINDIR)/test_node
 test_frame_ipc: $(BINDIR)/test_frame_ipc
 	@echo "\n========== test_frame_ipc =========="; ./$(BINDIR)/test_frame_ipc
 
+test_transport: $(BINDIR)/test_transport
+	@echo "\n========== test_transport =========="; ./$(BINDIR)/test_transport
+
 # ---- run all tests ---------------------------------------------------------
 
 test: $(ALL_TESTS)
@@ -64,8 +71,10 @@ test: $(ALL_TESTS)
 	./$(BINDIR)/test_node;         status3=$$?; \
 	echo "\n========== test_frame_ipc =========="; \
 	./$(BINDIR)/test_frame_ipc;    status4=$$?; \
+	echo "\n========== test_transport =========="; \
+	./$(BINDIR)/test_transport;    status5=$$?; \
 	echo "\n========== summary =========="; \
-	if [ $$status1 -eq 0 ] && [ $$status2 -eq 0 ] && [ $$status3 -eq 0 ] && [ $$status4 -eq 0 ]; then \
+	if [ $$status1 -eq 0 ] && [ $$status2 -eq 0 ] && [ $$status3 -eq 0 ] && [ $$status4 -eq 0 ] && [ $$status5 -eq 0 ]; then \
 		echo "all suites passed"; exit 0; \
 	else \
 		echo "one or more suites failed"; exit 1; \
