@@ -16,7 +16,11 @@ SERVER_DEPS := include/broker_server.hpp include/ipc/transport.hpp include/broke
 
 ALL_TESTS := $(BINDIR)/test_threadpool $(BINDIR)/test_node \
              $(BINDIR)/test_frame_ipc $(BINDIR)/test_transport
-ALL_EXAMPLES := $(BINDIR)/basic
+# Self-contained demos (embedded daemon) — built and run by `make examples`.
+SELF_EXAMPLES := $(BINDIR)/basic $(BINDIR)/keyvalue $(BINDIR)/frames
+# Cross-process demo — built only; run by hand against a broker_daemon.
+IPC_EXAMPLES  := $(BINDIR)/producer $(BINDIR)/consumer
+ALL_EXAMPLES  := $(SELF_EXAMPLES) $(IPC_EXAMPLES)
 
 .PHONY: all test examples daemon clean \
         test_threadpool test_node test_frame_ipc test_transport \
@@ -113,12 +117,19 @@ bench_shm_ring: $(BINDIR)/bench_shm_ring
 
 # ---- examples --------------------------------------------------------------
 
-$(BINDIR)/basic: examples/basic.cpp $(CLIENT_DEPS) $(SERVER_DEPS) $(BINDIR)/shm_ring.o
+$(ALL_EXAMPLES): $(BINDIR)/%: examples/%.cpp $(CLIENT_DEPS) $(SERVER_DEPS) examples/tick.hpp $(BINDIR)/shm_ring.o
 	@mkdir -p $(BINDIR)
 	$(CXX) $(CXXFLAGS) $< $(BINDIR)/shm_ring.o -o $@ -lrt
 
-examples: $(BINDIR)/basic
-	@echo "\n========== basic example =========="; ./$(BINDIR)/basic
+examples: $(ALL_EXAMPLES) $(BINDIR)/broker_daemon
+	@for e in $(SELF_EXAMPLES); do \
+		echo "\n========== $$e =========="; ./$$e; \
+	done
+	@echo "\n========== cross-process (producer / consumer) =========="
+	@echo "built. run in three terminals:"
+	@echo "  ./$(BINDIR)/broker_daemon"
+	@echo "  ./$(BINDIR)/consumer"
+	@echo "  ./$(BINDIR)/producer"
 
 # ---- clean -----------------------------------------------------------------
 

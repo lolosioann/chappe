@@ -7,7 +7,7 @@
 #include <string>
 
 int main(int argc, char **argv) {
-  std::string path = (argc > 1) ? argv[1] : "/tmp/broker.sock";
+  std::string path = (argc > 1) ? argv[1] : ipc::default_broker_addr();
 
   // Block SIGINT/SIGTERM here so accept/reader threads inherit the mask and the
   // signal is delivered to sigwait below for a clean shutdown.

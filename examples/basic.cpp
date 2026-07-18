@@ -31,15 +31,14 @@ MAKE_TOPIC(MotorCommand, "motor.command");
 // ---- Main ------------------------------------------------------------------
 
 int main() {
-  const std::string sock = "/tmp/broker_example.sock";
-  ipc::BrokerServer broker(sock);
+  ipc::BrokerServer broker; // in-process here; real use: run broker_daemon
 
   Node sensor("sensor");                 // publishes IMU readings
   Node vision("vision", 2);              // heavy processing on 2 worker threads
   Node control("control");              // latency-sensitive, synchronous
   Node actuator("actuator");            // drives motor commands
   for (Node *n : {&sensor, &vision, &control, &actuator})
-    n->connect(sock);
+    n->connect(); // defaults to the well-known broker address
 
   // vision subscribes to IMU, publishes lane estimates asynchronously
   vision.subscribe([&vision](const IMUReading &msg) {

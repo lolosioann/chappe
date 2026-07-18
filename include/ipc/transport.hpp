@@ -1,6 +1,7 @@
 #pragma once
 #include <cerrno>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <type_traits>
@@ -91,6 +92,13 @@ enum : uint8_t {
 // ---- Unix socket helpers --------------------------------------------------
 // Transport is just a connected byte-stream fd; these produce one. Swap in a
 // TCP variant later without touching the client or daemon.
+
+// Well-known broker socket. Both the daemon and its clients default to this, so
+// the common case never names a path; $BROKER_SOCKET overrides it per-deployment.
+inline std::string default_broker_addr() {
+  const char *env = ::getenv("BROKER_SOCKET");
+  return env ? std::string(env) : std::string("/tmp/broker.sock");
+}
 
 inline int unix_connect(const std::string &path) {
   int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);

@@ -53,8 +53,9 @@ public:
   Node(const Node &) = delete;
   Node &operator=(const Node &) = delete;
 
-  // Connect to a broker daemon listening on `path` and start the reader thread.
-  void connect(const std::string &path) {
+  // Connect to a broker daemon and start the reader thread. Defaults to the
+  // well-known address ($BROKER_SOCKET or /tmp/broker.sock).
+  void connect(const std::string &path = ipc::default_broker_addr()) {
     if (fd_ >= 0)
       throw std::logic_error("node already connected");
     int fd = ipc::unix_connect(path);

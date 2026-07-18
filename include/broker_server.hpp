@@ -28,7 +28,7 @@ namespace ipc {
 // count or fan-out throughput actually demands it.
 class BrokerServer {
 public:
-  explicit BrokerServer(const std::string &path) {
+  explicit BrokerServer(const std::string &path = default_broker_addr()) {
     listen_fd_ = unix_listen(path);
     if (listen_fd_ < 0)
       throw std::runtime_error("broker listen failed: " + path);

@@ -31,10 +31,13 @@ Requires a C++17 compiler and `-lrt` (POSIX shm).
 ## Run the daemon
 
 ```sh
-./bin/broker_daemon /tmp/broker.sock     # Ctrl-C / SIGTERM to stop
+./bin/broker_daemon                      # listens on the default address
+./bin/broker_daemon /tmp/mybroker.sock   # or an explicit path
 ```
 
-Every node connects to that socket path.
+Both the daemon and its clients default to the well-known address — `$BROKER_SOCKET`
+if set, otherwise `/tmp/broker.sock` — so the common case never names a path.
+Ctrl-C / SIGTERM stops the daemon.
 
 ## Usage
 
@@ -52,8 +55,8 @@ Then drive everything through `Node`.
 ```cpp
 Node sensor("sensor");
 Node vision("vision", 2);   // 2 worker threads => handlers run on a pool
-sensor.connect("/tmp/broker.sock");
-vision.connect("/tmp/broker.sock");
+sensor.connect();           // default address; or connect("/tmp/mybroker.sock")
+vision.connect();
 
 vision.subscribe([](const IMUReading &m) { /* ... */ });  // type deduced
 vision.sync();              // ensure the subscription is live at the daemon
@@ -143,6 +146,27 @@ include/ipc/              FrameHandle, shm ring C++ wrappers, wire protocol
 include/shm_ring.h        C shm ring interface
 src/shm_ring.c            C shm ring implementation
 src/broker_daemon.cpp     the daemon main()
-examples/basic.cpp        sensor -> vision -> control -> actuator pipeline
+examples/                 runnable demos, one per transport (see below)
 tests/                    per-layer suites + shm ring stress/bench
+```
+
+## Examples
+
+`make examples` builds them all and runs the self-contained ones.
+
+| file | transport | shows |
+|------|-----------|-------|
+| `basic.cpp`    | pub/sub    | sensor→vision→control→actuator pipeline, sync + async nodes |
+| `keyvalue.cpp` | get/set    | daemon-backed store, read-through cache, live update push |
+| `frames.cpp`   | shm frames | zero-copy camera→vision, only FrameHandle on the broker |
+| `producer.cpp` / `consumer.cpp` | pub/sub | **real cross-process** pub/sub — separate programs over the daemon |
+
+The first three embed the daemon in-process to stay trivially runnable. The
+producer/consumer pair is the genuine multi-process path — run each in its own
+terminal against a `broker_daemon`, sharing the message contract in `tick.hpp`:
+
+```sh
+./bin/broker_daemon      # terminal 1
+./bin/consumer           # terminal 2 — subscribes, prints ticks
+./bin/producer           # terminal 3 — publishes 10 ticks
 ```
