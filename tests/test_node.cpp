@@ -1,9 +1,13 @@
 // tests/test_node.cpp
 #include "broker.hpp"
+#include "broker_server.hpp"
 #include "node.hpp"
 #include "test.hpp"
 #include <atomic>
+#include <chrono>
 #include <string>
+#include <thread>
+#include <unistd.h>
 
 // ---- Messages --------------------------------------------------------------
 
@@ -17,157 +21,148 @@ struct Event {
 MAKE_TOPIC(Cmd, "cmd");
 MAKE_TOPIC(Event, "event");
 
+namespace ipc {
+template <> struct wire_codec<Event> {
+  static void encode(const Event &e, std::vector<char> &out) {
+    out.insert(out.end(), e.name.begin(), e.name.end());
+  }
+  static bool decode(const char *d, size_t n, Event &out) {
+    out.name.assign(d, n);
+    return true;
+  }
+};
+} // namespace ipc
+
+static std::string sock_path(const char *tag) {
+  return std::string("/tmp/broker_node_") + tag + "_" +
+         std::to_string(::getpid()) + ".sock";
+}
+
+// spin until `pred` or a 2s timeout; keeps tests robust against async delivery
+template <typename P> static bool wait_until(P pred) {
+  for (int i = 0; i < 400; i++) {
+    if (pred())
+      return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return pred();
+}
+
 // ---- Tests -----------------------------------------------------------------
 
 void test_node_name() {
-  Broker<Cmd> broker;
-  Node<Cmd> node("controller", broker);
+  Node node("controller");
   ASSERT_EQ(node.name(), std::string("controller"));
 }
 
-void test_node_subscribe_and_publish() {
-  Broker<Cmd> broker;
-  Node<Cmd> node("a", broker);
-  int count = 0;
-
-  node.subscribe([&count](const Cmd &c) { count += c.value; });
-
-  node.publish(Cmd{3});
-  node.publish(Cmd{7});
-
-  ASSERT_EQ(count, 10);
-}
-
-void test_node_unsubscribes_on_destruction() {
-  Broker<Cmd> broker;
-  int count = 0;
-
-  {
-    Node<Cmd> node("a", broker);
-    node.subscribe([&count](const Cmd &) { count++; });
-    broker.publish(Cmd{0});
-  } // node destroyed → all guards released
-
-  broker.publish(Cmd{0}); // should not reach handler
-
-  ASSERT_EQ(count, 1);
-}
-
 void test_two_nodes_communicate() {
-  Broker<Cmd, Event> broker;
+  auto p = sock_path("comm");
+  ipc::BrokerServer server(p);
+  Node sender("sender");
+  Node receiver("receiver");
+  sender.connect(p);
+  receiver.connect(p);
 
-  Node<Cmd, Event> sender("sender", broker);
-  Node<Cmd, Event> receiver("receiver", broker);
-
-  int received = 0;
+  std::atomic<int> received{0};
   receiver.subscribe([&received](const Cmd &c) { received += c.value; });
+  receiver.sync(); // subscription is live before we publish
 
   sender.publish(Cmd{5});
   sender.publish(Cmd{3});
 
-  ASSERT_EQ(received, 8);
+  ASSERT_TRUE(wait_until([&] { return received.load() == 8; }));
 }
 
 void test_node_multiple_topic_subscriptions() {
-  Broker<Cmd, Event> broker;
-  Node<Cmd, Event> node("multi", broker);
+  auto p = sock_path("multi");
+  ipc::BrokerServer server(p);
+  Node pub("pub");
+  Node node("multi");
+  pub.connect(p);
+  node.connect(p);
 
-  int cmd_count = 0;
-  int event_count = 0;
-
+  std::atomic<int> cmd_count{0};
+  std::atomic<int> event_count{0};
   node.subscribe([&cmd_count](const Cmd &) { cmd_count++; });
   node.subscribe([&event_count](const Event &) { event_count++; });
+  node.sync();
 
-  broker.publish(Cmd{0});
-  broker.publish(Cmd{0});
-  broker.publish(Event{"e"});
+  pub.publish(Cmd{0});
+  pub.publish(Cmd{0});
+  pub.publish(Event{"e"});
 
-  ASSERT_EQ(cmd_count, 2);
-  ASSERT_EQ(event_count, 1);
+  ASSERT_TRUE(wait_until([&] { return cmd_count.load() == 2; }));
+  ASSERT_TRUE(wait_until([&] { return event_count.load() == 1; }));
 }
 
 void test_node_async_dispatch() {
-  Broker<Cmd> broker;
-  Node<Cmd> node("async_node", broker, 2); // 2 worker threads
-  std::atomic<int> count{0};
+  auto p = sock_path("async");
+  ipc::BrokerServer server(p);
+  Node pub("pub");
+  Node node("async_node", 2); // 2 worker threads
+  pub.connect(p);
+  node.connect(p);
 
+  std::atomic<int> count{0};
   node.subscribe([&count](const Cmd &c) { count += c.value; });
+  node.sync();
 
   for (int i = 0; i < 10; i++)
-    broker.publish(Cmd{1});
+    pub.publish(Cmd{1});
 
-  node.drain(); // wait for all async handlers to complete
-
+  ASSERT_TRUE(wait_until([&] { return count.load() == 10; }));
+  node.drain();
   ASSERT_EQ(count.load(), 10);
 }
 
-void test_async_node_unsubscribes_cleanly() {
-  Broker<Cmd> broker;
-  std::atomic<int> count{0};
+// async node with slow handlers is destroyed while work is in flight — must
+// join its pool cleanly, no hang or crash.
+void test_async_node_teardown_clean() {
+  auto p = sock_path("teardown");
+  ipc::BrokerServer server(p);
+  Node pub("pub");
+  pub.connect(p);
 
+  std::atomic<int> count{0};
   {
-    Node<Cmd> node("async", broker, 2);
+    Node node("async", 2);
+    node.connect(p);
     node.subscribe([&count](const Cmd &) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
       count++;
     });
+    node.sync();
 
     for (int i = 0; i < 10; i++)
-      broker.publish(Cmd{0});
+      pub.publish(Cmd{0});
 
-    node.drain();
-    // node destroyed → guards released, pool joins workers cleanly
-  }
-
-  broker.publish(Cmd{0}); // silent — node is gone
+    wait_until([&] { return count.load() == 10; });
+  } // node destroyed → reader stops, pool joins cleanly
 
   ASSERT_EQ(count.load(), 10);
 }
 
-void test_sync_and_async_nodes_share_broker() {
-  Broker<Cmd> broker;
-
-  Node<Cmd> sync_node("sync", broker, 0);   // synchronous
-  Node<Cmd> async_node("async", broker, 2); // async
-
-  std::atomic<int> sync_count{0};
-  std::atomic<int> async_count{0};
-
-  sync_node.subscribe([&sync_count](const Cmd &) { sync_count++; });
-  async_node.subscribe([&async_count](const Cmd &) { async_count++; });
-
-  for (int i = 0; i < 20; i++)
-    broker.publish(Cmd{0});
-
-  async_node.drain();
-
-  ASSERT_EQ(sync_count.load(), 20);
-  ASSERT_EQ(async_count.load(), 20);
+void test_publish_requires_connection() {
+  Node n("lone");
+  bool threw = false;
+  try {
+    n.publish(Cmd{1});
+  } catch (const std::logic_error &) {
+    threw = true;
+  }
+  ASSERT_TRUE(threw);
 }
 
 // ---- Main ------------------------------------------------------------------
 
 int main() {
   test_case("node reports correct name", test_node_name);
-
-  test_case("node subscribe and publish", test_node_subscribe_and_publish);
-
-  test_case("node unsubscribes all on destruction",
-            test_node_unsubscribes_on_destruction);
-
-  test_case("two nodes communicate through shared broker",
+  test_case("two nodes communicate through the broker",
             test_two_nodes_communicate);
-
   test_case("node subscribes to multiple topics",
             test_node_multiple_topic_subscriptions);
-
   test_case("async node dispatches on thread pool", test_node_async_dispatch);
-
-  test_case("async node unsubscribes and joins cleanly",
-            test_async_node_unsubscribes_cleanly);
-
-  test_case("sync and async nodes share one broker",
-            test_sync_and_async_nodes_share_broker);
-
+  test_case("async node tears down cleanly", test_async_node_teardown_clean);
+  test_case("publish requires a connection", test_publish_requires_connection);
   return test_summary();
 }

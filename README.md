@@ -1,72 +1,87 @@
 # broker
 
-A typed, in-process publish/subscribe message bus for C++17 that scales out to
-two things the same API can't normally reach:
+A small central message broker for C++17, IPC-first — think MQTT pub/sub +
+redis get/set + zero-copy shared-memory frames, unified under one client
+interface:
 
+- **central daemon** — a `broker_daemon` process routes between many client
+  nodes. Publishers and subscribers don't know each other; they only share a
+  topic name.
+- **pub/sub** — publish to a topic, and every node subscribed to it receives the
+  message (the publisher itself does not — noLocal).
+- **get/set** — an authoritative key/value store in the daemon, with a
+  read-through cache on each client so warm reads are local.
 - **zero-copy frames** — big sensor/video payloads move through POSIX shared
-  memory, not the broker.
-- **other processes** — a socket bridge mirrors selected topics across a
-  connection, and carries a small replicated key/value store on the side.
+  memory directly producer→consumer; only tiny metadata rides the broker.
 
-Topics are C++ *types*, so dispatch is resolved at compile time — no string
-lookups on the publish path. Header-only except for the C shared-memory ring.
+Topics are C++ *types* on the client side, so the API is compile-time
+type-safe, while the daemon stays a dumb, payload-agnostic string router.
+Header-only except for the C shared-memory ring.
 
 ## Build
 
 ```sh
+make daemon     # build the broker_daemon binary
 make test       # build + run all suites
-make examples   # build + run examples/basic.cpp
+make examples   # build + run examples/basic.cpp (runs an in-process daemon)
 ```
 
-Requires a C++17 compiler and `-lrt` (POSIX shm). See the `Makefile` for
-individual targets (`test_broker`, `stress_shm_ring`, `bench_shm_ring`, ...).
+Requires a C++17 compiler and `-lrt` (POSIX shm).
+
+## Run the daemon
+
+```sh
+./bin/broker_daemon /tmp/broker.sock     # Ctrl-C / SIGTERM to stop
+```
+
+Every node connects to that socket path.
 
 ## Usage
 
-Everything is driven through `Node` — a per-participant facade over the broker.
-First declare messages as plain types and give each a topic name:
+Declare messages as plain types and give each a topic name:
 
 ```cpp
 struct IMUReading { float ax, ay, az; };
 MAKE_TOPIC(IMUReading, "imu.reading");
 ```
 
+Then drive everything through `Node`.
+
 ### Pub/sub
 
 ```cpp
-Broker<IMUReading, /* ...other topics... */> broker;
+Node sensor("sensor");
+Node vision("vision", 2);   // 2 worker threads => handlers run on a pool
+sensor.connect("/tmp/broker.sock");
+vision.connect("/tmp/broker.sock");
 
-// 0 threads => handlers run synchronously on the publisher's thread.
-// N threads => handlers run on an N-worker pool.
-Node<IMUReading> sensor("sensor", broker);
-Node<IMUReading> vision("vision", broker, 2);
-
-vision.subscribe([](const IMUReading &m) { /* ... */ });   // type deduced
+vision.subscribe([](const IMUReading &m) { /* ... */ });  // type deduced
+vision.sync();              // ensure the subscription is live at the daemon
 sensor.publish(IMUReading{.ax = 0.1f});
-
-vision.drain();   // wait for async handlers (tests/shutdown)
 ```
 
-Subscriptions live as long as the `Node`; destroying it unsubscribes.
+Note `sync()`: it's a round-trip barrier. v1 has no resubscribe, so a publish
+sent before its subscriber has registered at the daemon is simply lost — call
+`sync()` after subscribing (or otherwise wait) before peers start publishing.
 
 ### Frames (shared memory)
 
-For large payloads, only lightweight metadata (`FrameHandle`: timestamp, width,
-height, stride) goes through the broker — the bytes live in a shared-memory ring
-keyed by the topic name, so producer and consumer agree on the segment with no
-shared config. A frame topic derives from `ipc::FrameHandle`:
+Only the lightweight metadata (`FrameHandle`: timestamp, width, height, stride)
+goes through the broker; the bytes live in a shared-memory ring keyed by the
+topic name, so producer and consumer agree on the segment with no shared config.
+A frame topic derives from `ipc::FrameHandle`:
 
 ```cpp
 struct FrontCam : ipc::FrameHandle {};
 MAKE_TOPIC(FrontCam, "cam.front");
 
-// producer process
+// producer
 producer.create_frame_ring<FrontCam>(/*slot_size=*/w*h, /*num_slots=*/4);
 producer.publish_frame<FrontCam>(ts, w, h, w, [&](void *dst, size_t n) {
-  memcpy(dst, pixels, n);           // decode/render straight into the slot
+  memcpy(dst, pixels, n);            // decode/render straight into the slot
 });
 
-// consumer process
+// consumer
 consumer.attach_frame_ring<FrontCam>();
 consumer.subscribe_frame<FrontCam>([](const FrontCam &meta, ipc::ShmSlotView &slot) {
   process(slot.data(), slot.size()); // slot auto-released after handler returns
@@ -76,63 +91,58 @@ consumer.subscribe_frame<FrontCam>([](const FrontCam &meta, ipc::ShmSlotView &sl
 `publish_frame` returns `false` if every slot is held by a consumer (frame
 dropped); `frame_drops()` counts frames a subscriber couldn't retain.
 
-### Bridging to another process
+### get/set store
 
 ```cpp
-// process A
-a.bridge_listen("/tmp/link.sock");   // blocks until B connects
-a.bridge_forward<IMUReading>();      // local publishes of this topic go to B
-
-// process B
-b.bridge_connect("/tmp/link.sock");
-b.subscribe([](const IMUReading &m) { /* receives A's publishes */ });
+a.set<int>("gear", 3);              // writes the authoritative value in the daemon
+int g = b.get<int>("gear").value(); // first get round-trips + starts watching
+int h = b.get<int>("gear").value(); // subsequent gets read the local cache
 ```
 
-Only topics you `bridge_forward<T>()` are sent; any forwarded topic arriving from
-the peer is republished into the local broker.
-
-### Replicated key/value store
-
-Layered on the same bridge — a last-writer-wins latest-value store:
-
-```cpp
-a.set<int>("gear", 3);                       // writes locally, pushes to peer
-std::optional<int> g = b.get<int>("gear");   // reads B's replica
-```
-
-Eventually consistent; values set before a peer connects are not back-filled.
+`get<T>` reads the local cache once warm. The first read of a key round-trips to
+the daemon and subscribes to future updates, so later `set`s by any node are
+pushed into the cache — subsequent reads are local with no round-trip. Unknown
+keys return `std::nullopt`.
 
 ## Implementation notes
 
-- **Broker** — `Broker<Topics...>` holds one `TopicState<T>` per topic in a
-  tuple. Each state guards its handler list with a `shared_mutex` and snapshots
-  it before dispatch, so publishing never holds the lock across a handler.
+- **Daemon** (`include/broker_server.hpp`) — thread-per-client, a
+  `topic → {subscribers}` routing table, and the authoritative KV store with a
+  `key → {watchers}` set. It only ever sees `[kind][topic/key][opaque bytes]`;
+  all typing (`MAKE_TOPIC`, `wire_codec`) stays on the clients. Fine for tens of
+  long-lived nodes; a single global lock guards the store (see the ponytail
+  notes in the source for the ceilings).
+
+- **Wire protocol** (`include/ipc/transport.hpp`) — one frame shape,
+  `[u8 kind][u32 name_len][name][u32 payload_len][payload]`, native-endian
+  (same-host assumption). Kinds cover subscribe/publish, kv set/get/reply/update,
+  and a ping/pong barrier. `wire_codec<T>` handles trivially-copyable types as
+  raw bytes, with specializations for `std::string` and `std::vector<T>`.
+
+- **KV coherence** — the daemon serializes each store write and its pushes under
+  one lock, and clients cache only from daemon-originated frames (reply + push),
+  in receive order. So a `get` reply can never overwrite a newer pushed value,
+  and every client's cache converges to the daemon's write order.
 
 - **Shared-memory ring** (`src/shm_ring.c`) — single-producer / multi-consumer
   **latest-frame broadcast** (not a FIFO): consumers only ever see the newest
   published frame, held zero-copy via a refcount. Slots cycle through
   `FREE → WRITING → READY`; a seq_cst handshake between the producer's acquire
-  and the consumer's retain prevents a slot being overwritten while it's being
-  read. Geometry lives in the segment and is gated by a magic value written last,
-  so a consumer can attach knowing only the name.
-
-- **Socket bridge** (`include/ipc/transport.hpp`) — mirrors topics over any
-  connected byte stream (Unix-socket helpers provided; TCP-swappable). Wire
-  frame: `[u8 kind][u32 name_len][name][u32 payload_len][payload]`, native-endian
-  (same-host assumption). `wire_codec<T>` handles trivially-copyable types as raw
-  bytes, with specializations for `std::string` and `std::vector<T>`. A
-  thread-local marker suppresses echoing a topic straight back to the peer it
-  came from.
+  and the consumer's retain prevents a slot being overwritten while it's read.
+  Geometry lives in the segment, gated by a magic value written last, so a
+  consumer can attach knowing only the name.
 
 ## Layout
 
 ```
-include/broker.hpp        typed pub/sub core
+include/broker.hpp        Topic/MAKE_TOPIC + handler-type deduction
+include/broker_server.hpp central broker daemon (BrokerServer)
+include/node.hpp          Node client (pub/sub + frames + get/set)
 include/threadpool.hpp    fixed-size worker pool
-include/node.hpp          Node facade (pub/sub + frames + bridge + kv)
-include/ipc/              FrameHandle, shm ring C++ wrappers, socket bridge
+include/ipc/              FrameHandle, shm ring C++ wrappers, wire protocol
 include/shm_ring.h        C shm ring interface
 src/shm_ring.c            C shm ring implementation
+src/broker_daemon.cpp     the daemon main()
 examples/basic.cpp        sensor -> vision -> control -> actuator pipeline
 tests/                    per-layer suites + shm ring stress/bench
 ```

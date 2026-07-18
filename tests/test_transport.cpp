@@ -1,16 +1,17 @@
-// tests/test_transport.cpp
+// tests/test_transport.cpp — broker daemon routing + kv store over the wire.
 #include "broker.hpp"
-#include "ipc/transport.hpp"
+#include "broker_server.hpp"
 #include "node.hpp"
 #include "test.hpp"
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
 #include <mutex>
 #include <optional>
 #include <string>
-#include <sys/socket.h>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 // ---- Messages --------------------------------------------------------------
@@ -31,16 +32,12 @@ struct Pose {
   int32_t id;
   std::string label;
 }; // mixed composite -> user codec
-struct Ack {
-  int32_t n;
-}; // used to fence the no-echo test
 
 MAKE_TOPIC(Cmd, "cmd");
 MAKE_TOPIC(Imu, "imu");
 MAKE_TOPIC(Flag, "flag");
 MAKE_TOPIC(Samples, "samples");
 MAKE_TOPIC(Pose, "pose");
-MAKE_TOPIC(Ack, "ack");
 
 // ---- User codecs for the composite types -----------------------------------
 
@@ -97,33 +94,34 @@ template <class T> struct Sink {
   }
 };
 
-using Bus = Broker<Cmd, Imu, Flag, Samples, Pose, Ack>;
+static std::string sock_path(const char *tag) {
+  return std::string("/tmp/broker_tp_") + tag + "_" +
+         std::to_string(::getpid()) + ".sock";
+}
 
 // ---- Tests -----------------------------------------------------------------
 
+// The daemon routes pod / list / string-composite payloads verbatim; codecs run
+// only on the clients.
 void test_transport_types() {
-  int sv[2];
-  ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
-
-  Bus a, b;
-  ipc::SocketBridge<Cmd, Imu, Flag, Samples, Pose, Ack> bridgeA(a, sv[0]);
-  ipc::SocketBridge<Cmd, Imu, Flag, Samples, Pose, Ack> bridgeB(b, sv[1]);
-  bridgeA.forward<Cmd>();
-  bridgeA.forward<Imu>();
-  bridgeA.forward<Flag>();
-  bridgeA.forward<Samples>();
-  bridgeA.forward<Pose>();
+  auto p = sock_path("types");
+  ipc::BrokerServer server(p);
+  Node a("a");
+  Node b("b");
+  a.connect(p);
+  b.connect(p);
 
   Sink<Cmd> s_cmd;
   Sink<Imu> s_imu;
   Sink<Flag> s_flag;
   Sink<Samples> s_samp;
   Sink<Pose> s_pose;
-  auto g1 = b.subscribe<Cmd>([&](const Cmd &m) { s_cmd.push(m); });
-  auto g2 = b.subscribe<Imu>([&](const Imu &m) { s_imu.push(m); });
-  auto g3 = b.subscribe<Flag>([&](const Flag &m) { s_flag.push(m); });
-  auto g4 = b.subscribe<Samples>([&](const Samples &m) { s_samp.push(m); });
-  auto g5 = b.subscribe<Pose>([&](const Pose &m) { s_pose.push(m); });
+  b.subscribe([&](const Cmd &m) { s_cmd.push(m); });
+  b.subscribe([&](const Imu &m) { s_imu.push(m); });
+  b.subscribe([&](const Flag &m) { s_flag.push(m); });
+  b.subscribe([&](const Samples &m) { s_samp.push(m); });
+  b.subscribe([&](const Pose &m) { s_pose.push(m); });
+  b.sync();
 
   a.publish(Cmd{42});
   a.publish(Imu{1.5f, 2.5f, 9.8f});
@@ -133,118 +131,88 @@ void test_transport_types() {
 
   ASSERT_TRUE(s_cmd.wait_count(1));
   ASSERT_EQ(s_cmd.at(0).value, 42);
-
   ASSERT_TRUE(s_imu.wait_count(1));
-  ASSERT_EQ(s_imu.at(0). az, 9.8f);
-
+  ASSERT_EQ(s_imu.at(0).az, 9.8f);
   ASSERT_TRUE(s_flag.wait_count(1));
   ASSERT_EQ(s_flag.at(0).on, true);
-
   ASSERT_TRUE(s_samp.wait_count(1));
   Samples got = s_samp.at(0);
   ASSERT_EQ(got.v.size(), (size_t)5);
   ASSERT_EQ(got.v[4], 5);
-
   ASSERT_TRUE(s_pose.wait_count(1));
   ASSERT_EQ(s_pose.at(0).id, 7);
   ASSERT_EQ(s_pose.at(0).label, std::string("front-left"));
 }
 
-// Both ends forward Cmd. Publishing on A must reach B exactly once and must NOT
-// echo back to A. Fenced deterministically: B emits an Ack in reaction (a
-// *different* topic, so it forwards), and once A sees the Ack the in-order
-// socket guarantees any echo would already have arrived.
+// noLocal: a publisher that also subscribes to a topic does not receive its own
+// publishes; other subscribers do.
 void test_transport_no_echo() {
-  int sv[2];
-  ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+  auto p = sock_path("echo");
+  ipc::BrokerServer server(p);
+  Node a("a");
+  Node b("b");
+  a.connect(p);
+  b.connect(p);
 
-  Bus a, b;
-  ipc::SocketBridge<Cmd, Imu, Flag, Samples, Pose, Ack> bridgeA(a, sv[0]);
-  ipc::SocketBridge<Cmd, Imu, Flag, Samples, Pose, Ack> bridgeB(b, sv[1]);
-  bridgeA.forward<Cmd>();
-  bridgeA.forward<Ack>();
-  bridgeB.forward<Cmd>();
-  bridgeB.forward<Ack>();
+  std::atomic<int> a_got{0};
+  Sink<Cmd> b_sink;
+  a.subscribe([&](const Cmd &) { a_got++; });
+  b.subscribe([&](const Cmd &c) { b_sink.push(c); });
+  a.sync();
+  b.sync();
 
-  int a_cmd = 0;
-  auto ga = a.subscribe<Cmd>([&](const Cmd &) { a_cmd++; });
-  Sink<Ack> s_ack;
-  auto gack = a.subscribe<Ack>([&](const Ack &m) { s_ack.push(m); });
-  // B reacts to a received Cmd by emitting an Ack.
-  auto gb = b.subscribe<Cmd>([&](const Cmd &) { b.publish(Ack{99}); });
+  a.publish(Cmd{1});
 
-  a.publish(Cmd{1}); // local delivery -> a_cmd == 1; forwarded to B
-
-  ASSERT_TRUE(s_ack.wait_count(1)); // B got the Cmd and its Ack came back
-  ASSERT_EQ(s_ack.at(0).n, 99);
-  ASSERT_EQ(a_cmd, 1); // no echo of Cmd looped back to A
+  ASSERT_TRUE(b_sink.wait_count(1)); // peer received it
+  ASSERT_EQ(b_sink.at(0).value, 1);
+  std::this_thread::sleep_for(std::chrono::milliseconds(50)); // let any echo land
+  ASSERT_EQ(a_got.load(), 0);        // publisher did not
 }
 
-// Node-level API: bridge_attach + bridge_forward, driven through Node::publish
-// and Node::subscribe rather than a raw Broker + SocketBridge.
-void test_node_bridge() {
-  int sv[2];
-  ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+// Store lives in the daemon: cold get round-trips, later sets are pushed into
+// the reader's cache so warm gets are local; unknown key is nullopt.
+void test_kv_store() {
+  auto p = sock_path("kv");
+  ipc::BrokerServer server(p);
+  Node w("writer");
+  Node r("reader");
+  w.connect(p);
+  r.connect(p);
 
-  Bus ba, bb;
-  Node<Cmd, Imu, Flag, Samples, Pose, Ack> na("a", ba);
-  Node<Cmd, Imu, Flag, Samples, Pose, Ack> nb("b", bb);
-  na.bridge_attach(sv[0]);
-  nb.bridge_attach(sv[1]);
-  ASSERT_TRUE(na.bridged());
-  na.bridge_forward<Cmd>();
+  w.set<float>("speed", 3.5f);
+  w.sync(); // SET is applied before the reader's cold get
 
-  Sink<Cmd> s;
-  nb.subscribe([&](const Cmd &c) { s.push(c); });
+  auto v = r.get<float>("speed"); // cold: round-trip to daemon
+  ASSERT_TRUE(v.has_value());
+  ASSERT_EQ(*v, 3.5f);
 
-  na.publish(Cmd{7});
-  ASSERT_TRUE(s.wait_count(1));
-  ASSERT_EQ(s.at(0).value, 7);
-}
+  auto self = w.get<float>("speed"); // writer reads its own value back
+  ASSERT_TRUE(self.has_value());
+  ASSERT_EQ(*self, 3.5f);
 
-// Replicated get/set: set on one node, get on the bridged peer after the
-// update propagates; local get is immediate; unknown key is nullopt.
-void test_kv_replicated() {
-  int sv[2];
-  ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+  w.set<float>("speed", 9.0f); // pushed to the watching reader
 
-  Bus ba, bb;
-  Node<Cmd, Imu, Flag, Samples, Pose, Ack> na("a", ba);
-  Node<Cmd, Imu, Flag, Samples, Pose, Ack> nb("b", bb);
-  na.bridge_attach(sv[0]);
-  nb.bridge_attach(sv[1]);
-
-  na.set<float>("target_speed", 3.5f);
-  na.set<std::string>("mode", "race");
-
-  auto local = na.get<float>("target_speed"); // setter sees its own value now
-  ASSERT_TRUE(local.has_value());
-  ASSERT_EQ(*local, 3.5f);
-
-  std::optional<float> rf;
-  for (int i = 0; i < 200 && !rf.has_value(); i++) {
-    rf = nb.get<float>("target_speed");
-    if (!rf)
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  std::optional<float> v2;
+  for (int i = 0; i < 400; i++) {
+    v2 = r.get<float>("speed"); // warm: reads cache, updated by the push
+    if (v2 && *v2 == 9.0f)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
-  ASSERT_TRUE(rf.has_value());
-  ASSERT_EQ(*rf, 3.5f);
+  ASSERT_TRUE(v2.has_value());
+  ASSERT_EQ(*v2, 9.0f);
 
-  std::optional<std::string> rs;
-  for (int i = 0; i < 200 && !rs.has_value(); i++) {
-    rs = nb.get<std::string>("mode");
-    if (!rs)
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  }
-  ASSERT_TRUE(rs.has_value());
-  ASSERT_EQ(*rs, std::string("race"));
+  w.set<std::string>("mode", "race");
+  w.sync();
+  auto m = r.get<std::string>("mode");
+  ASSERT_TRUE(m.has_value());
+  ASSERT_EQ(*m, std::string("race"));
 
-  ASSERT_TRUE(!nb.get<int32_t>("nope").has_value()); // unknown key
+  ASSERT_TRUE(!r.get<int32_t>("nope").has_value()); // unknown key
 }
 
-void test_kv_requires_bridge() {
-  Bus b;
-  Node<Cmd, Imu, Flag, Samples, Pose, Ack> n("lone", b);
+void test_kv_requires_connection() {
+  Node n("lone");
   bool threw = false;
   try {
     n.set<int32_t>("k", 1);
@@ -255,10 +223,9 @@ void test_kv_requires_bridge() {
 }
 
 int main() {
-  test_case("transport carries pod/list/string/composite", test_transport_types);
-  test_case("bidirectional forward does not echo", test_transport_no_echo);
-  test_case("node-level bridge api", test_node_bridge);
-  test_case("replicated get/set store", test_kv_replicated);
-  test_case("get/set requires a bridge", test_kv_requires_bridge);
+  test_case("daemon carries pod/list/string/composite", test_transport_types);
+  test_case("publish is not echoed to the publisher", test_transport_no_echo);
+  test_case("daemon-backed get/set with read-through cache", test_kv_store);
+  test_case("get/set requires a connection", test_kv_requires_connection);
   return test_summary();
 }

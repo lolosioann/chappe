@@ -13,8 +13,7 @@ namespace ipc {
 
 // Non-owning view of a retained slot. Guarantees release() is called exactly
 // once, even on exceptions unwinding through a handler. Move-only: a slot's
-// "held" status must have exactly one owner, same reasoning as
-// SubscriptionGuard in broker.hpp.
+// "held" status must have exactly one owner.
 class ShmSlotView {
 public:
   ShmSlotView() noexcept : ring_(nullptr), idx_(-1) {}

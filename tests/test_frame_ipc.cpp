@@ -1,14 +1,20 @@
 // tests/test_frame_ipc.cpp
+// Frames: the small FrameHandle is routed through the daemon; the pixel bytes
+// move producer->consumer directly through the shm ring.
 #include "broker.hpp"
+#include "broker_server.hpp"
 #include "ipc/frame_handle.hpp"
 #include "node.hpp"
 #include "test.hpp"
 #include <atomic>
+#include <chrono>
 #include <cstring>
+#include <string>
 #include <sys/mman.h>
+#include <thread>
+#include <unistd.h>
 
 // ---- Frame topics ----------------------------------------------------------
-// Each frame topic is its own broker message type, derived from ipc::FrameHandle.
 
 struct FrontCam : ipc::FrameHandle {};
 struct RearCam : ipc::FrameHandle {};
@@ -20,25 +26,43 @@ MAKE_TOPIC(SideCam, "cam.side");
 
 static void clean(const char *shm) { shm_unlink(shm); }
 
+static std::string sock_path(const char *tag) {
+  return std::string("/tmp/broker_frame_") + tag + "_" +
+         std::to_string(::getpid()) + ".sock";
+}
+
+template <typename P> static bool wait_until(P pred) {
+  for (int i = 0; i < 400; i++) {
+    if (pred())
+      return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return pred();
+}
+
 // ---- Tests -----------------------------------------------------------------
 
 void test_frame_sync() {
   clean("/broker_cam.front");
-  Broker<FrontCam> broker;
-  Node<FrontCam> producer("prod", broker);
-  Node<FrontCam> consumer("cons", broker);
+  auto p = sock_path("front");
+  ipc::BrokerServer server(p);
+  Node producer("prod");
+  Node consumer("cons");
+  producer.connect(p);
+  consumer.connect(p);
   producer.create_frame_ring<FrontCam>(16, 4);
   consumer.attach_frame_ring<FrontCam>();
 
-  bool called = false;
+  std::atomic<bool> called{false};
   FrontCam got{};
   unsigned char pix[16] = {0};
   consumer.subscribe_frame<FrontCam>(
       [&](const FrontCam &fh, ipc::ShmSlotView &v) {
-        called = true;
         got = fh;
         std::memcpy(pix, v.data(), v.size());
+        called.store(true); // release: publishes got/pix to the reader below
       });
+  consumer.sync();
 
   bool ok = producer.publish_frame<FrontCam>(
       12345, 4, 4, 4, [](void *d, size_t n) {
@@ -47,7 +71,7 @@ void test_frame_sync() {
       });
 
   ASSERT_TRUE(ok);
-  ASSERT_TRUE(called);
+  ASSERT_TRUE(wait_until([&] { return called.load(); }));
   ASSERT_EQ(got.timestamp_ns, (uint64_t)12345);
   ASSERT_EQ(got.width, (uint32_t)4);
   ASSERT_EQ((int)pix[0], 1);
@@ -56,9 +80,12 @@ void test_frame_sync() {
 
 void test_frame_async() {
   clean("/broker_cam.rear");
-  Broker<RearCam> broker;
-  Node<RearCam> producer("prod", broker);
-  Node<RearCam> consumer("cons", broker, 2); // 2 worker threads
+  auto p = sock_path("rear");
+  ipc::BrokerServer server(p);
+  Node producer("prod");
+  Node consumer("cons", 2); // 2 worker threads
+  producer.connect(p);
+  consumer.connect(p);
   producer.create_frame_ring<RearCam>(8, 4);
   consumer.attach_frame_ring<RearCam>();
 
@@ -71,29 +98,35 @@ void test_frame_async() {
         first_byte.store((int)static_cast<unsigned char *>(v.data())[0]);
         called.store(true);
       });
+  consumer.sync();
 
   producer.publish_frame<RearCam>(
       777, 2, 2, 2, [](void *d, size_t n) { std::memset(d, 0xAB, n); });
-  consumer.drain();
 
-  ASSERT_TRUE(called.load());
+  ASSERT_TRUE(wait_until([&] { return called.load(); }));
+  consumer.drain();
   ASSERT_EQ(got_ts.load(), (uint64_t)777);
   ASSERT_EQ(first_byte.load(), 0xAB);
 }
 
 void test_frame_drop_no_ring() {
   clean("/broker_cam.side");
-  Broker<SideCam> broker;
-  Node<SideCam> producer("prod", broker);
-  Node<SideCam> consumer("cons", broker); // subscribes but never attaches
+  auto p = sock_path("side");
+  ipc::BrokerServer server(p);
+  Node producer("prod");
+  Node consumer("cons"); // subscribes but never attaches
+  producer.connect(p);
+  consumer.connect(p);
   producer.create_frame_ring<SideCam>(8, 4);
 
   consumer.subscribe_frame<SideCam>(
       [](const SideCam &, ipc::ShmSlotView &) { /* never reached */ });
+  consumer.sync();
 
   producer.publish_frame<SideCam>(
       1, 1, 1, 1, [](void *d, size_t n) { std::memset(d, 0, n); });
 
+  ASSERT_TRUE(wait_until([&] { return consumer.frame_drops() == 1; }));
   ASSERT_EQ(consumer.frame_drops(), (uint64_t)1);
 }
 
