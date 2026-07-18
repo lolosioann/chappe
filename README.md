@@ -107,6 +107,44 @@ the daemon and subscribes to future updates, so later `set`s by any node are
 pushed into the cache — subsequent reads are local with no round-trip. Unknown
 keys return `std::nullopt`.
 
+## Python
+
+`python/broker.py` is a Python client that speaks the same wire protocol, so
+Python nodes interoperate with C++ nodes over the same `broker_daemon`. Messages
+are `bytes` — bring your own serialization:
+
+```python
+from broker import Node
+import struct
+
+with Node("py") as node:
+    node.connect()                                   # $BROKER_SOCKET or /tmp/broker.sock
+    node.subscribe("tick", lambda p: print(struct.unpack("=i", p)[0]))
+    node.sync()
+    node.publish("tick", struct.pack("=i", 42))
+    node.set("mode", b"race")
+    print(node.get("mode"))                          # b'race'
+```
+
+Because it's the same wire format, a Python subscriber decodes a C++ node's
+messages directly — a C++ `struct Tick { int seq; }` is `struct.pack("=i", seq)`.
+
+- **pub/sub and get/set** are pure stdlib — no build, no dependencies.
+- **Frames** work too, via `python/shm_ring.py`, a `ctypes` binding to the same
+  C ring the C++ side uses (so `make libshm_ring` first). Same layout both ways,
+  so a Python node can read frames a C++ node produced and vice versa:
+
+  ```python
+  cam.create_frame_ring("cam.front", w*h, 4)
+  cam.publish_frame("cam.front", ts, w, h, w, pixels)          # producer
+  vision.attach_frame_ring("cam.front")
+  vision.subscribe_frame("cam.front", lambda meta, view: ...)  # zero-copy view
+  ```
+
+Self-checks: `make daemon libshm_ring` then `python3 python/test_broker.py` and
+`python3 python/test_frames.py`. Demos (with a daemon running): `example.py`,
+`example_frames.py`.
+
 ## Implementation notes
 
 - **Daemon** (`include/broker_server.hpp`) — thread-per-client, a
@@ -147,6 +185,7 @@ include/shm_ring.h        C shm ring interface
 src/shm_ring.c            C shm ring implementation
 src/broker_daemon.cpp     the daemon main()
 examples/                 runnable demos, one per transport (see below)
+python/                   Python client: broker.py + shm_ring.py (ctypes) + demos + checks
 tests/                    per-layer suites + shm ring stress/bench
 ```
 

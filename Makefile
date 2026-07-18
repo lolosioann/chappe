@@ -22,11 +22,11 @@ SELF_EXAMPLES := $(BINDIR)/basic $(BINDIR)/keyvalue $(BINDIR)/frames
 IPC_EXAMPLES  := $(BINDIR)/producer $(BINDIR)/consumer
 ALL_EXAMPLES  := $(SELF_EXAMPLES) $(IPC_EXAMPLES)
 
-.PHONY: all test examples daemon clean \
+.PHONY: all test examples daemon libshm_ring clean \
         test_threadpool test_node test_frame_ipc test_transport \
         test_shm_ring stress_shm_ring bench_shm_ring
 
-all: test examples daemon
+all: test examples daemon libshm_ring
 
 # ---- broker daemon ---------------------------------------------------------
 
@@ -92,6 +92,13 @@ test: $(ALL_TESTS)
 $(BINDIR)/shm_ring.o: src/shm_ring.c include/shm_ring.h
 	@mkdir -p $(BINDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# Shared library for the Python ctypes binding (python/shm_ring.py).
+libshm_ring: $(BINDIR)/libshm_ring.so
+
+$(BINDIR)/libshm_ring.so: src/shm_ring.c include/shm_ring.h
+	@mkdir -p $(BINDIR)
+	$(CC) $(CFLAGS) -fPIC -shared $< -o $@ -lrt
 
 $(BINDIR)/test_shm_ring: src/shm_ring.c include/shm_ring.h
 	@mkdir -p $(BINDIR)
