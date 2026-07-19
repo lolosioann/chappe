@@ -78,7 +78,7 @@ class Ring:
         if len(data) > size:
             raise ValueError(f"frame {len(data)}B exceeds slot {size}B")
         addr = self._lib.shm_ring_slot_data(self._ring, idx)
-        (ctypes.c_char * size).from_address(addr)[: len(data)] = data
+        ctypes.memmove(addr, data, len(data))  # bulk copy; slice-assign is O(n) in Python
         self._lib.shm_ring_publish_slot(self._ring, idx)
         return True
 

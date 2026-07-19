@@ -86,8 +86,9 @@ private:
   }
 
   void client_loop(ClientPtr c) {
+    FrameReader reader(c->fd);
     Frame f;
-    while (running_.load() && read_frame(c->fd, f))
+    while (running_.load() && reader.next(f))
       handle_frame(c, f);
     remove_client(c);
   }

@@ -122,6 +122,15 @@ $(BINDIR)/bench_shm_ring: tests/bench_shm_ring.c src/shm_ring.c include/shm_ring
 bench_shm_ring: $(BINDIR)/bench_shm_ring
 	@echo "\n========== bench_shm_ring =========="; ./$(BINDIR)/bench_shm_ring
 
+# ---- broker-layer benchmark (-O2 for realistic numbers) --------------------
+
+$(BINDIR)/bench_broker: tests/bench_broker.cpp $(CLIENT_DEPS) $(SERVER_DEPS) $(BINDIR)/shm_ring.o
+	@mkdir -p $(BINDIR)
+	$(CXX) $(CXXFLAGS) -O2 $< $(BINDIR)/shm_ring.o -o $@ -lrt
+
+bench_broker: $(BINDIR)/bench_broker
+	@echo "\n========== bench_broker =========="; ./$(BINDIR)/bench_broker
+
 # ---- examples --------------------------------------------------------------
 
 $(ALL_EXAMPLES): $(BINDIR)/%: examples/%.cpp $(CLIENT_DEPS) $(SERVER_DEPS) examples/tick.hpp $(BINDIR)/shm_ring.o

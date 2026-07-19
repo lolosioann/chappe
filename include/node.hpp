@@ -360,8 +360,9 @@ private:
   }
 
   void read_loop() {
+    ipc::FrameReader reader(fd_);
     ipc::Frame f;
-    while (running_.load() && ipc::read_frame(fd_, f)) {
+    while (running_.load() && reader.next(f)) {
       switch (f.kind) {
       case ipc::MSG_PUBLISH:
         dispatch(f.name, f.payload);

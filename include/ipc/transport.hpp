@@ -161,34 +161,10 @@ inline bool write_full(int fd, const char *p, size_t n) {
   return true;
 }
 
-inline bool read_full(int fd, char *p, size_t n) {
-  size_t off = 0;
-  while (off < n) {
-    ssize_t k = ::recv(fd, p + off, n - off, 0);
-    if (k < 0) {
-      if (errno == EINTR)
-        continue;
-      return false;
-    }
-    if (k == 0)
-      return false; // peer closed
-    off += static_cast<size_t>(k);
-  }
-  return true;
-}
-
 inline void append_u32(std::vector<char> &buf, uint32_t v) {
   char b[4];
   std::memcpy(b, &v, 4);
   buf.insert(buf.end(), b, b + 4);
-}
-
-inline bool read_u32(int fd, uint32_t &v) {
-  char b[4];
-  if (!read_full(fd, b, 4))
-    return false;
-  std::memcpy(&v, b, 4);
-  return true;
 }
 
 // Build a complete frame in one buffer so a single locked write_full emits it
@@ -206,24 +182,85 @@ inline std::vector<char> build_frame(uint8_t kind, const std::string &name,
   return buf;
 }
 
-inline bool read_frame(int fd, Frame &out) {
-  char kind;
-  if (!read_full(fd, &kind, 1))
-    return false;
-  uint32_t nlen;
-  if (!read_u32(fd, nlen))
-    return false;
-  out.name.assign(nlen, '\0');
-  if (nlen && !read_full(fd, &out.name[0], nlen))
-    return false;
-  uint32_t plen;
-  if (!read_u32(fd, plen))
-    return false;
-  out.payload.assign(plen, 0);
-  if (plen && !read_full(fd, out.payload.data(), plen))
-    return false;
-  out.kind = static_cast<uint8_t>(kind);
-  return true;
-}
+// Buffered frame reader. The old per-field read_frame did one recv() per field
+// (5 syscalls/frame); this recv()s into a chunk and parses frames out of it, so
+// the common case is ~1 syscall per frame — the dominant cost on the daemon's
+// hot path. One reader per fd, owned by that fd's read loop: it may buffer bytes
+// of the *next* frame, so nothing else may recv() on the same fd.
+//
+// ponytail: the buffer grows to the largest frame seen and never shrinks. Fine
+// here — only control/metadata crosses the socket (pixels go via shm), so frames
+// are small. Add a shrink-after-large if a huge one-off ever bloats it.
+class FrameReader {
+public:
+  explicit FrameReader(int fd) : fd_(fd), buf_(4096) {}
+
+  // Read one full frame into `out`. Returns false on EOF or socket error.
+  bool next(Frame &out) {
+    if (!require(1))
+      return false;
+    uint8_t kind = static_cast<uint8_t>(buf_[pos_++]);
+    uint32_t nlen;
+    if (!read_u32(nlen))
+      return false;
+    if (!require(nlen))
+      return false;
+    out.name.assign(buf_.data() + pos_, nlen);
+    pos_ += nlen;
+    uint32_t plen;
+    if (!read_u32(plen))
+      return false;
+    if (!require(plen))
+      return false;
+    out.payload.assign(buf_.begin() + pos_, buf_.begin() + pos_ + plen);
+    pos_ += plen;
+    out.kind = kind;
+    return true;
+  }
+
+private:
+  bool read_u32(uint32_t &v) {
+    if (!require(4))
+      return false;
+    std::memcpy(&v, buf_.data() + pos_, 4);
+    pos_ += 4;
+    return true;
+  }
+
+  // Ensure at least `n` unparsed bytes sit contiguously at buf_[pos_].
+  bool require(size_t n) {
+    while (end_ - pos_ < n)
+      if (!fill(n))
+        return false;
+    return true;
+  }
+
+  // Compact consumed bytes, grow to fit `need`, then recv() once.
+  bool fill(size_t need) {
+    if (pos_ > 0) {
+      size_t rem = end_ - pos_;
+      if (rem)
+        std::memmove(buf_.data(), buf_.data() + pos_, rem);
+      pos_ = 0;
+      end_ = rem;
+    }
+    if (buf_.size() < need)
+      buf_.resize(need);
+    if (buf_.size() == end_)
+      buf_.resize(buf_.size() * 2); // leave room for recv
+    ssize_t k = ::recv(fd_, buf_.data() + end_, buf_.size() - end_, 0);
+    if (k < 0)
+      return errno == EINTR; // retry on next require() iteration
+    if (k == 0)
+      return false; // peer closed
+    end_ += static_cast<size_t>(k);
+    return true;
+  }
+
+  int fd_;
+  std::vector<char> buf_;
+  size_t pos_ = 0; // next unparsed byte
+  size_t end_ = 0; // one past last valid byte
+};
 
 } // namespace ipc

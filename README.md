@@ -145,6 +145,19 @@ Self-checks: `make daemon libshm_ring` then `python3 python/test_broker.py` and
 `python3 python/test_frames.py`. Demos (with a daemon running): `example.py`,
 `example_frames.py`.
 
+## Benchmarks
+
+```sh
+make bench_shm_ring      # raw shm ring: throughput / latency / contended
+make bench_broker        # C++ broker layer: pub/sub, kv, frames
+make daemon libshm_ring && python3 python/bench.py   # same, Python client
+```
+
+`bench_broker` and `bench.py` measure the same things (pub/sub RTT + throughput,
+kv cold/warm/set, frame throughput) so C++ and Python are directly comparable.
+All are loopback on one host — real numbers depend on the machine; treat them as
+relative, not absolute. A captured snapshot lives in [BENCHMARKS.md](BENCHMARKS.md).
+
 ## Implementation notes
 
 - **Daemon** (`include/broker_server.hpp`) — thread-per-client, a
