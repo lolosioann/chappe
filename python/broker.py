@@ -23,7 +23,7 @@ from concurrent.futures import Future
 
 # Frame kinds — must match the enum in include/ipc/transport.hpp.
 (_SUBSCRIBE, _UNSUBSCRIBE, _PUBLISH, _KV_SET, _KV_GET, _KV_REPLY, _KV_UPDATE,
- _PING, _PONG) = range(9)
+ _PING, _PONG, _PUBLISH_RETAIN) = range(10)
 
 _U32 = struct.Struct("=I")  # native-endian u32, matching the C++ memcpy
 
@@ -94,9 +94,12 @@ class Node:
 
     # ---- pub/sub -----------------------------------------------------------
 
-    def publish(self, topic, payload):
+    def publish(self, topic, payload, retain=False):
+        """Publish `payload` (bytes) to `topic`. With retain=True the daemon
+        keeps it as the topic's last value and replays it to future subscribers;
+        the default is classic pub/sub (late subscribers miss it)."""
         self._require_connected()
-        self._send(_PUBLISH, topic.encode(), payload)
+        self._send(_PUBLISH_RETAIN if retain else _PUBLISH, topic.encode(), payload)
 
     def subscribe(self, topic, handler):
         """Register handler(payload: bytes) for `topic`. Handlers run on the

@@ -59,6 +59,24 @@ def main():
                 time.sleep(0.01)
             assert b.get("k") == b"world"
 
+            # retained publish is replayed to a subscriber that joins after it;
+            # a non-retained one is not.
+            a.publish("status", b"ready", retain=True)
+            a.publish("event", b"tick")  # not retained
+            a.sync()
+            with Node("late") as late:
+                late.connect(sock)
+                seen = {}
+                late.subscribe("status", lambda p: seen.__setitem__("status", p))
+                late.subscribe("event", lambda p: seen.__setitem__("event", p))
+                deadline = time.time() + 2
+                while "status" not in seen and time.time() < deadline:
+                    time.sleep(0.01)
+                late.sync()
+                time.sleep(0.05)  # let any (wrongly) replayed event arrive
+                assert seen.get("status") == b"ready", seen
+                assert "event" not in seen, seen
+
         print("python client self-check OK")
     finally:
         proc.terminate()

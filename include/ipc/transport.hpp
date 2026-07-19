@@ -87,7 +87,18 @@ enum : uint8_t {
   MSG_KV_UPDATE = 6,
   MSG_PING = 7,
   MSG_PONG = 8,
+  // Like MSG_PUBLISH but the daemon also stores the payload as the topic's
+  // retained last-value and replays it to future subscribers. Client->daemon
+  // only; the daemon routes it onward (and replays it) as a plain MSG_PUBLISH.
+  MSG_PUBLISH_RETAIN = 9,
 };
+
+// Upper bound on a single frame's name or payload length. A peer sending a
+// bogus/huge length must not make the reader allocate gigabytes and take the
+// whole daemon down with a bad_alloc — over this, we drop the connection.
+// Generous: only control/metadata crosses the socket (pixels go via shm), so
+// real frames are KB-scale; 64 MB is pure headroom.
+static constexpr uint32_t MAX_FRAME_BYTES = 64u * 1024 * 1024;
 
 // ---- Unix socket helpers --------------------------------------------------
 // Transport is just a connected byte-stream fd; these produce one. Swap in a
@@ -201,14 +212,14 @@ public:
       return false;
     uint8_t kind = static_cast<uint8_t>(buf_[pos_++]);
     uint32_t nlen;
-    if (!read_u32(nlen))
-      return false;
+    if (!read_u32(nlen) || nlen > MAX_FRAME_BYTES)
+      return false; // oversized/garbage length -> drop the connection
     if (!require(nlen))
       return false;
     out.name.assign(buf_.data() + pos_, nlen);
     pos_ += nlen;
     uint32_t plen;
-    if (!read_u32(plen))
+    if (!read_u32(plen) || plen > MAX_FRAME_BYTES)
       return false;
     if (!require(plen))
       return false;

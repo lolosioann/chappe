@@ -63,9 +63,19 @@ vision.sync();              // ensure the subscription is live at the daemon
 sensor.publish(IMUReading{.ax = 0.1f});
 ```
 
-Note `sync()`: it's a round-trip barrier. v1 has no resubscribe, so a publish
-sent before its subscriber has registered at the daemon is simply lost — call
-`sync()` after subscribing (or otherwise wait) before peers start publishing.
+**Retained messages.** By default a subscriber only receives messages published
+while it was subscribed — a publish sent before it registers is lost. For
+state/status topics where a late joiner needs the current value, publish with
+`retain=true`: the daemon keeps the last value and replays it on subscribe.
+
+```cpp
+sensor.publish(SensorState{.calibrated = true}, /*retain=*/true);
+// ...a node that subscribes later still gets that last value immediately.
+```
+
+`sync()` (a round-trip barrier) is still useful to order setup deterministically
+in tests, but retained publishes are the real fix for the publish-before-subscribe
+race on state topics. Plain event/data streams stay non-retained.
 
 ### Frames (shared memory)
 

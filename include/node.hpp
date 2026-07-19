@@ -75,13 +75,18 @@ public:
     register_topic<T>(std::function<void(const T &)>(std::forward<F>(handler)));
   }
 
-  template <typename T> void publish(const T &msg) {
+  // With retain=true the daemon keeps this as topic T's last value and replays
+  // it to any node that subscribes later — use it for state/status topics a
+  // late joiner needs the current value of. Default (retain=false) is classic
+  // pub/sub: a subscriber only gets messages published while it was subscribed.
+  template <typename T> void publish(const T &msg, bool retain = false) {
     require_connected();
     static_assert(Topic<T>::name != nullptr,
                   "publish<T> needs MAKE_TOPIC(T, \"...\")");
     std::vector<char> bytes;
     ipc::wire_codec<T>::encode(msg, bytes);
-    send(ipc::MSG_PUBLISH, Topic<T>::name, bytes.data(), bytes.size());
+    send(retain ? ipc::MSG_PUBLISH_RETAIN : ipc::MSG_PUBLISH, Topic<T>::name,
+         bytes.data(), bytes.size());
   }
 
   // Round-trip barrier: returns once the daemon has processed every frame this

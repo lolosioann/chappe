@@ -222,10 +222,83 @@ void test_kv_requires_connection() {
   ASSERT_TRUE(threw);
 }
 
+// Retained publish is replayed to a subscriber that joins AFTER it — the fix
+// for the publish-before-subscribe race. A non-retained publish is not.
+void test_retained_delivery() {
+  auto p = sock_path("retain");
+  ipc::BrokerServer server(p);
+  Node pub("pub");
+  pub.connect(p);
+
+  pub.publish(Cmd{7}, /*retain=*/true); // retained: stored by the daemon
+  pub.publish(Imu{1, 2, 3});            // not retained: gone once routed
+  pub.sync();                           // both processed before we subscribe
+
+  Node late("late");
+  late.connect(p);
+  Sink<Cmd> s_cmd;
+  Sink<Imu> s_imu;
+  late.subscribe([&](const Cmd &m) { s_cmd.push(m); });
+  late.subscribe([&](const Imu &m) { s_imu.push(m); });
+
+  ASSERT_TRUE(s_cmd.wait_count(1));     // retained Cmd replayed on subscribe
+  ASSERT_EQ(s_cmd.at(0).value, 7);
+
+  late.sync();                          // fence: any Imu replay would be here
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  ASSERT_EQ(s_imu.size(), (size_t)0);   // non-retained Imu was NOT replayed
+
+  // A later retained publish overwrites the stored value.
+  pub.publish(Cmd{9}, /*retain=*/true);
+  ASSERT_TRUE(s_cmd.wait_count(2));     // live delivery to the now-subscriber
+  Node late2("late2");
+  late2.connect(p);
+  Sink<Cmd> s2;
+  late2.subscribe([&](const Cmd &m) { s2.push(m); });
+  ASSERT_TRUE(s2.wait_count(1));
+  ASSERT_EQ(s2.at(0).value, 9);         // newest retained value, not 7
+}
+
+// A frame whose declared length exceeds MAX_FRAME_BYTES must drop only that
+// connection, not crash the daemon — other clients keep working.
+void test_oversized_frame_drops_client() {
+  auto p = sock_path("oversized");
+  ipc::BrokerServer server(p);
+  Node good("good");
+  good.connect(p);
+  Sink<Cmd> s;
+  good.subscribe([&](const Cmd &m) { s.push(m); });
+  good.sync();
+
+  // Hand-craft a frame with a bogus 1 GB payload length and send it raw.
+  int fd = ipc::unix_connect(p);
+  ASSERT_TRUE(fd >= 0);
+  std::vector<char> frame;
+  frame.push_back((char)ipc::MSG_PUBLISH);
+  ipc::append_u32(frame, 3);                 // name_len
+  const char *nm = "cmd";
+  frame.insert(frame.end(), nm, nm + 3);
+  ipc::append_u32(frame, 1u << 30);          // payload_len = 1 GB (bogus)
+  ipc::write_full(fd, frame.data(), frame.size());
+  ::close(fd); // daemon should drop this client, not allocate 1 GB and die
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  // Daemon still alive and routing: a normal publish still reaches `good`.
+  Node pub("pub");
+  pub.connect(p);
+  pub.publish(Cmd{123});
+  ASSERT_TRUE(s.wait_count(1));
+  ASSERT_EQ(s.at(0).value, 123);
+}
+
 int main() {
   test_case("daemon carries pod/list/string/composite", test_transport_types);
   test_case("publish is not echoed to the publisher", test_transport_no_echo);
   test_case("daemon-backed get/set with read-through cache", test_kv_store);
   test_case("get/set requires a connection", test_kv_requires_connection);
+  test_case("retained publish replays to late subscriber", test_retained_delivery);
+  test_case("oversized frame drops client, not daemon",
+            test_oversized_frame_drops_client);
   return test_summary();
 }

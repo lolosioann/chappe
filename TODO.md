@@ -8,10 +8,11 @@ current build is coherent and tested. Add each only when real use asks for it.
 - [ ] **Client reconnect + resubscribe.** If the daemon restarts or a node
       drops, subscriptions are lost with no recovery. Add a reconnect loop to
       the client (C++ `Node`, Python `Node`) that re-sends every `SUBSCRIBE`.
-- [ ] **Startup ordering.** A publish sent before its subscriber registers is
-      dropped; `sync()` is the only mitigation. Consider retained / last-value
-      delivery on subscribe (like MQTT retained messages) so late subscribers
-      still get the current value.
+- [x] **Startup ordering.** ~~A publish sent before its subscriber registers is
+      dropped.~~ Done: opt-in retained messages — `publish(msg, retain=true)`
+      stores a last-value the daemon replays on subscribe (MQTT-style). State
+      topics use it; event/data streams stay non-retained. `sync()` remains for
+      deterministic test ordering.
 
 ## Transport reach
 
@@ -34,12 +35,13 @@ Sentinel/Cluster, the data-type zoo, ACL modules, search/JSON/timeseries) we
 deliberately **don't** rebuild: at that point, run Redis alongside for durable/
 structured/cross-host state and keep this on the hot path.
 
-- [ ] **Streams-style retained / replayable delivery** (highest value). Redis
+- [~] **Streams-style retained / replayable delivery** (highest value). Redis
       Streams keep an append-only log with replay-from-ID and consumer-group
-      acks; classic pub/sub (ours) is fire-and-forget. A bounded per-topic ring
-      of recent messages + last-value-on-subscribe gets ~80% of it cheaply and
-      **closes the "Startup ordering" item above** and half of reconnect
-      (a reattached node replays what it missed).
+      acks; classic pub/sub (ours) is fire-and-forget. **Partly done:** opt-in
+      last-value retention (`publish(msg, retain=true)`) replays the current
+      value on subscribe. Remaining: a bounded per-topic ring of *recent*
+      messages (replay-N-back, not just last), which covers the reconnect
+      replay case (a reattached node gets what it missed, not only the latest).
 - [ ] **Atomic KV ops** — `incr`, `setnx`/compare-and-swap. Our `set` is a blind
       last-writer-wins overwrite, so nodes can't do counters, locks, or barriers.
       The daemon already serializes the KV under one lock, so these are a few
@@ -55,6 +57,15 @@ structured/cross-host state and keep this on the hot path.
 Already tracked elsewhere as Redis analogues: pattern pub/sub = `PSUBSCRIBE`
 (see *Topic wildcards*), socket auth = Redis `ACL` (see *Access control*),
 durability/HA (see *Resilience*, but mostly out of scope per above).
+
+## Hardening
+
+- [x] **Frame-size cap.** Done: `MAX_FRAME_BYTES` (64 MB) in `transport.hpp`;
+      an oversized/garbage length drops that one connection instead of letting
+      the reader `resize()` to gigabytes and take the daemon down with a
+      `bad_alloc`.
+- [ ] **Access control** — no auth on the socket (also under *Routing*); any
+      local process can connect, subscribe to anything, and overwrite any key.
 
 ## Daemon ceilings (`broker_server.hpp`, marked `ponytail:`)
 

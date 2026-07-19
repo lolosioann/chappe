@@ -96,9 +96,29 @@ private:
   void handle_frame(const ClientPtr &c, const Frame &f) {
     switch (f.kind) {
     case MSG_SUBSCRIBE: {
-      std::unique_lock<std::shared_mutex> lk(subs_mu_);
-      subs_[f.name].insert(c);
-      c->topics.insert(f.name); // only this client's reader thread touches it
+      {
+        std::unique_lock<std::shared_mutex> lk(subs_mu_);
+        subs_[f.name].insert(c);
+        c->topics.insert(f.name); // only this client's reader thread touches it
+      }
+      // Deliver the topic's retained last-value, if any, so a subscriber that
+      // joined after a retained publish still gets the current state. Only
+      // topics published with MSG_PUBLISH_RETAIN have one; plain pub/sub topics
+      // don't, so their late subscribers miss what they weren't around for. A
+      // subscribe racing a retained publish may deliver it twice — last-value
+      // semantics make that idempotent.
+      std::vector<char> retained;
+      bool have = false;
+      {
+        std::lock_guard<std::mutex> lk(retained_mu_);
+        auto it = retained_.find(f.name);
+        if (it != retained_.end()) {
+          retained = it->second;
+          have = true;
+        }
+      }
+      if (have)
+        send_to(*c, MSG_PUBLISH, f.name, retained.data(), retained.size());
       break;
     }
     case MSG_UNSUBSCRIBE: {
@@ -109,20 +129,16 @@ private:
       c->topics.erase(f.name);
       break;
     }
-    case MSG_PUBLISH: {
-      std::vector<ClientPtr> targets; // snapshot keeps subscribers alive
-      {
-        std::shared_lock<std::shared_mutex> lk(subs_mu_);
-        auto it = subs_.find(f.name);
-        if (it != subs_.end())
-          for (const auto &s : it->second)
-            if (s.get() != c.get()) // noLocal: don't echo to the publisher
-              targets.push_back(s);
-      }
-      for (const auto &t : targets)
-        send_to(*t, MSG_PUBLISH, f.name, f.payload.data(), f.payload.size());
+    case MSG_PUBLISH:
+      route_publish(c, f);
       break;
-    }
+    case MSG_PUBLISH_RETAIN:
+      route_publish(c, f);
+      { // store the last-value for replay to future subscribers
+        std::lock_guard<std::mutex> lk(retained_mu_);
+        retained_[f.name].assign(f.payload.begin(), f.payload.end());
+      }
+      break;
     case MSG_KV_SET: {
       // Serialize the store write and its pushes under one lock so a watcher
       // observes SETs and its own GET reply in a single consistent order (a
@@ -196,6 +212,21 @@ private:
       }
   }
 
+  // Fan a publish out to every subscriber of the topic except the sender.
+  void route_publish(const ClientPtr &c, const Frame &f) {
+    std::vector<ClientPtr> targets; // snapshot keeps subscribers alive
+    {
+      std::shared_lock<std::shared_mutex> lk(subs_mu_);
+      auto it = subs_.find(f.name);
+      if (it != subs_.end())
+        for (const auto &s : it->second)
+          if (s.get() != c.get()) // noLocal: don't echo to the publisher
+            targets.push_back(s);
+    }
+    for (const auto &t : targets)
+      send_to(*t, MSG_PUBLISH, f.name, f.payload.data(), f.payload.size());
+  }
+
   void send_to(Client &c, uint8_t kind, const std::string &name,
                const char *payload, size_t plen) {
     auto buf = build_frame(kind, name, payload, plen);
@@ -214,6 +245,11 @@ private:
 
   std::shared_mutex subs_mu_;
   std::unordered_map<std::string, std::set<ClientPtr>> subs_;
+
+  // Last-value per topic, for topics published with MSG_PUBLISH_RETAIN. Its own
+  // lock so the publish hot path keeps routing under a shared_lock.
+  std::mutex retained_mu_;
+  std::unordered_map<std::string, std::vector<char>> retained_;
 
   std::mutex kv_mu_;
   std::unordered_map<std::string, std::vector<char>> kv_;
