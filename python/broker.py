@@ -18,6 +18,7 @@ import os
 import socket
 import struct
 import threading
+import time
 from collections import namedtuple
 from concurrent.futures import Future
 
@@ -44,10 +45,12 @@ class Node:
 
     def __init__(self, name):
         self.name = name
-        self._sock = None
+        self._sock = None               # current socket; None during reconnect
+        self._addr = None               # address to (re)connect to
+        self._started = False           # connect() succeeded at least once
         self._reader = None
         self._running = False
-        self._send_lock = threading.Lock()
+        self._send_lock = threading.Lock()  # guards _sock, serializes sends
         self._subs = {}                 # topic -> list of handler(bytes)
         self._subs_lock = threading.Lock()
         self._cache = {}                # key -> bytes
@@ -62,26 +65,39 @@ class Node:
     # ---- lifecycle ---------------------------------------------------------
 
     def connect(self, addr=None):
-        if self._sock is not None:
+        """Connect to the daemon and start the reader. The initial connect must
+        succeed; if the link later drops, the reader reconnects to the same
+        address and resubscribes transparently."""
+        if self._started:
             raise RuntimeError("node already connected")
+        addr = addr or default_broker_addr()
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.connect(addr or default_broker_addr())
+        s.connect(addr)  # initial connect must succeed
+        self._addr = addr
         self._sock = s
+        self._started = True
         self._running = True
-        self._reader = threading.Thread(target=self._read_loop, daemon=True)
+        self._reader = threading.Thread(target=self._run, daemon=True)
         self._reader.start()
 
+    def connected(self):
+        """True while a live connection exists (False during a reconnect wait)."""
+        return self._sock is not None
+
     def close(self):
-        if self._sock is not None:
-            self._running = False
-            try:
-                self._sock.shutdown(socket.SHUT_RDWR)  # unblock the reader
-            except OSError:
-                pass
-            if self._reader is not None:
-                self._reader.join()
-            self._sock.close()
-            self._sock = None
+        self._running = False
+        with self._send_lock:
+            if self._sock is not None:
+                try:
+                    self._sock.shutdown(socket.SHUT_RDWR)  # unblock the reader
+                except OSError:
+                    pass
+        if self._reader is not None:
+            self._reader.join()
+        with self._send_lock:
+            if self._sock is not None:
+                self._sock.close()
+                self._sock = None
         for ring in self._rings.values():  # reader stopped -> safe to tear down
             ring.destroy()
         self._rings.clear()
@@ -118,7 +134,8 @@ class Node:
         self._require_connected()
         rid = self._next_id()
         fut = self._register(rid)
-        self._send(_PING, b"", _U32.pack(rid))
+        if not self._send(_PING, b"", _U32.pack(rid)):
+            self._fulfill(rid, None)  # disconnected: nothing to flush
         fut.result(timeout=timeout)
 
     # ---- get/set -----------------------------------------------------------
@@ -137,7 +154,8 @@ class Node:
                 return self._cache.get(key)
         rid = self._next_id()
         fut = self._register(rid)
-        self._send(_KV_GET, key.encode(), _U32.pack(rid))
+        if not self._send(_KV_GET, key.encode(), _U32.pack(rid)):
+            self._fulfill(rid, None)  # disconnected: don't block on a dropped req
         return fut.result(timeout=timeout)
 
     # ---- frames (shared memory) -------------------------------------------
@@ -193,7 +211,7 @@ class Node:
     # ---- internals ---------------------------------------------------------
 
     def _require_connected(self):
-        if self._sock is None:
+        if not self._started:
             raise RuntimeError("node is not connected to a broker")
 
     def _next_id(self):
@@ -212,42 +230,73 @@ class Node:
             fut.set_result(value)
 
     def _send(self, kind, name, payload):
+        """Send a frame. Returns True if written; False during a reconnect
+        window (so request/reply callers don't block on a lost frame)."""
         frame = (bytes((kind,)) + _U32.pack(len(name)) + name +
                  _U32.pack(len(payload)) + payload)
         with self._send_lock:
-            self._sock.sendall(frame)
+            if self._sock is None:
+                return False
+            try:
+                self._sock.sendall(frame)
+                return True
+            except OSError:
+                return False
 
-    def _recv_exact(self, n):
+    def _recv_exact(self, sock, n):
         buf = bytearray()
         while len(buf) < n:
-            chunk = self._sock.recv(n - len(buf))
+            chunk = sock.recv(n - len(buf))
             if not chunk:
                 return None  # peer closed
             buf += chunk
         return bytes(buf)
 
-    def _read_frame(self):
-        hdr = self._recv_exact(1)
+    def _read_frame(self, sock):
+        hdr = self._recv_exact(sock, 1)
         if hdr is None:
             return None
-        nlen = self._recv_exact(4)
+        nlen = self._recv_exact(sock, 4)
         if nlen is None:
             return None
-        name = self._recv_exact(_U32.unpack(nlen)[0])
+        name = self._recv_exact(sock, _U32.unpack(nlen)[0])
         if name is None:
             return None
-        plen = self._recv_exact(4)
+        plen = self._recv_exact(sock, 4)
         if plen is None:
             return None
-        payload = self._recv_exact(_U32.unpack(plen)[0])
+        payload = self._recv_exact(sock, _U32.unpack(plen)[0])
         if payload is None:
             return None
         return hdr[0], name.decode(), payload
 
-    def _read_loop(self):
+    # Connection manager: read until the link drops, then reconnect to the same
+    # address and resubscribe, until the node is closed.
+    def _run(self):
+        sock = self._sock  # from connect()
+        while self._running:
+            self._read_until_closed(sock)
+            with self._send_lock:  # link down: tear down and unblock in-flight
+                if self._sock is not None:
+                    try:
+                        self._sock.close()
+                    except OSError:
+                        pass
+                    self._sock = None
+            self._fail_pending()
+            if not self._running:
+                return
+            sock = self._reconnect_backoff()
+            if sock is None:
+                return  # closed while backing off
+            with self._send_lock:
+                self._sock = sock
+            self._resubscribe()
+
+    def _read_until_closed(self, sock):
         try:
             while self._running:
-                frame = self._read_frame()
+                frame = self._read_frame(sock)
                 if frame is None:
                     break
                 kind, name, payload = frame
@@ -261,8 +310,39 @@ class Node:
                         self._cache[name] = payload
                 elif kind == _PONG and len(payload) >= 4:
                     self._fulfill(_U32.unpack(payload[:4])[0], None)
-        finally:
-            self._fail_pending()  # connection gone — unblock waiters
+        except OSError:
+            pass  # socket error -> treat as disconnect
+
+    def _reconnect_backoff(self):
+        delay = 0.01
+        while self._running:
+            try:
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.connect(self._addr)
+                return s
+            except OSError:
+                try:
+                    s.close()
+                except OSError:
+                    pass
+                slept = 0.0
+                while slept < delay and self._running:
+                    time.sleep(min(0.02, delay - slept))
+                    slept += 0.02
+                delay = min(delay * 2, 1.0)
+        return None
+
+    # Re-establish server-side state after a reconnect: re-send SUBSCRIBE for
+    # every topic. The daemon's KV watches are gone, so drop the local cache —
+    # the next get() cold-fetches and re-registers the watch.
+    def _resubscribe(self):
+        with self._subs_lock:
+            topics = list(self._subs.keys())
+        for t in topics:
+            self._send(_SUBSCRIBE, t.encode(), b"")
+        with self._kv_lock:
+            self._cache.clear()
+            self._watched.clear()
 
     def _dispatch(self, topic, payload):
         with self._subs_lock:

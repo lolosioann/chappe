@@ -4,7 +4,9 @@
 #include "ipc/shm_ring.hpp"
 #include "ipc/transport.hpp"
 #include "threadpool.hpp"
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <functional>
 #include <future>
@@ -38,12 +40,20 @@ public:
         pool_(threads ? std::make_unique<ThreadPool>(threads) : nullptr) {}
 
   ~Node() {
-    if (fd_ >= 0) {
-      running_.store(false);
-      ::shutdown(fd_, SHUT_RDWR); // unblock the reader's recv
-      if (reader_.joinable())
-        reader_.join();
-      ::close(fd_);
+    running_.store(false);
+    if (reader_.joinable()) {
+      { // unblock a reader parked in recv(); harmless if it's mid-backoff
+        std::lock_guard<std::mutex> lk(send_mu_);
+        if (fd_ >= 0)
+          ::shutdown(fd_, SHUT_RDWR);
+      }
+      reader_.join();
+    }
+    { // reader owns fd_ in its loop, but close here too in case it never ran
+      std::lock_guard<std::mutex> lk(send_mu_);
+      if (fd_ >= 0)
+        ::close(fd_);
+      fd_ = -1;
     }
     // Members destruct in reverse declaration order after this body: pool_
     // (drains queued frame tasks) before rings_/frame_drops_, which those
@@ -54,19 +64,26 @@ public:
   Node &operator=(const Node &) = delete;
 
   // Connect to a broker daemon and start the reader thread. Defaults to the
-  // well-known address ($BROKER_SOCKET or /tmp/broker.sock).
+  // well-known address ($BROKER_SOCKET or /tmp/broker.sock). The initial connect
+  // must succeed (throws otherwise); if the connection later drops, the reader
+  // thread transparently reconnects to the same address and resubscribes.
   void connect(const std::string &path = ipc::default_broker_addr()) {
-    if (fd_ >= 0)
+    if (started_)
       throw std::logic_error("node already connected");
     int fd = ipc::unix_connect(path);
     if (fd < 0)
       throw std::runtime_error("node connect failed for '" + path + "'");
+    path_ = path;
     fd_ = fd;
+    started_ = true;
+    connected_.store(true);
     running_.store(true);
-    reader_ = std::thread([this] { read_loop(); });
+    reader_ = std::thread([this] { run(); });
   }
 
-  bool connected() const noexcept { return fd_ >= 0; }
+  // True while a live connection to the daemon exists (false during a reconnect
+  // backoff window).
+  bool connected() const noexcept { return connected_.load(); }
 
   // ---- pub/sub --------------------------------------------------------------
 
@@ -91,15 +108,16 @@ public:
 
   // Round-trip barrier: returns once the daemon has processed every frame this
   // node has sent so far. Handy after subscribe() to guarantee the daemon is
-  // routing this node's topics before a peer starts publishing (no reconnect/
-  // resubscribe in v1, so early publishes are otherwise lost).
+  // routing this node's topics before a peer starts publishing. Returns
+  // immediately (nothing to flush) if called during a reconnect window.
   void sync() {
     require_connected();
     uint32_t id = next_req_.fetch_add(1);
     auto fut = register_pending(id);
     char b[4];
     std::memcpy(b, &id, 4);
-    send(ipc::MSG_PING, "", b, 4);
+    if (!send(ipc::MSG_PING, "", b, 4))
+      fulfill(id, std::nullopt); // disconnected: don't block on a dropped ping
     fut.get();
   }
 
@@ -222,7 +240,8 @@ public:
     auto fut = register_pending(id);
     std::vector<char> pl;
     ipc::append_u32(pl, id);
-    send(ipc::MSG_KV_GET, key, pl.data(), pl.size());
+    if (!send(ipc::MSG_KV_GET, key, pl.data(), pl.size()))
+      fulfill(id, std::nullopt); // disconnected: don't block on a dropped request
 
     auto reply = fut.get(); // caching happens on the reader thread, in order
     if (!reply)
@@ -251,15 +270,20 @@ private:
   }
 
   void require_connected() const {
-    if (fd_ < 0)
+    if (!started_)
       throw std::logic_error("node is not connected to a broker");
   }
 
-  void send(uint8_t kind, const std::string &name, const char *payload,
+  // Returns true if the frame was written. A false means we're in a reconnect
+  // window (fd_ < 0): fire-and-forget publishes are simply dropped; request/
+  // reply callers (get/sync) use the return to avoid blocking on a lost frame.
+  bool send(uint8_t kind, const std::string &name, const char *payload,
             size_t plen) {
     auto buf = ipc::build_frame(kind, name, payload, plen);
     std::lock_guard<std::mutex> lk(send_mu_);
-    ipc::write_full(fd_, buf.data(), buf.size());
+    if (fd_ < 0)
+      return false;
+    return ipc::write_full(fd_, buf.data(), buf.size());
   }
 
   template <typename T> void register_topic(std::function<void(const T &)> user) {
@@ -364,8 +388,39 @@ private:
     pending_.clear();
   }
 
-  void read_loop() {
-    ipc::FrameReader reader(fd_);
+  // Connection manager: read frames until the link drops, then reconnect to the
+  // same address and resubscribe, until the node is closed. The first fd comes
+  // from connect(); later ones from reconnect_backoff().
+  void run() {
+    int fd = fd_; // established by connect()
+    while (running_.load()) {
+      read_until_closed(fd);
+
+      { // link is down — tear down the fd and unblock any in-flight request
+        std::lock_guard<std::mutex> lk(send_mu_);
+        connected_.store(false);
+        if (fd_ >= 0)
+          ::close(fd_);
+        fd_ = -1;
+      }
+      fail_pending();
+      if (!running_.load())
+        return;
+
+      fd = reconnect_backoff();
+      if (fd < 0)
+        return; // closed while backing off
+      {
+        std::lock_guard<std::mutex> lk(send_mu_);
+        fd_ = fd;
+        connected_.store(true);
+      }
+      resubscribe();
+    }
+  }
+
+  void read_until_closed(int fd) {
+    ipc::FrameReader reader(fd);
     ipc::Frame f;
     while (running_.load() && reader.next(f)) {
       switch (f.kind) {
@@ -389,13 +444,51 @@ private:
         break;
       }
     }
-    fail_pending(); // connection gone — unblock any waiting get()/sync()
+  }
+
+  // Retry unix_connect with exponential backoff (10ms -> 1s cap), bailing out
+  // promptly if the node is closed mid-wait. Returns the new fd, or -1 on close.
+  int reconnect_backoff() {
+    int delay_ms = 10;
+    while (running_.load()) {
+      int fd = ipc::unix_connect(path_);
+      if (fd >= 0)
+        return fd;
+      for (int slept = 0; slept < delay_ms && running_.load(); slept += 20)
+        std::this_thread::sleep_for(std::chrono::milliseconds(
+            std::min(20, delay_ms - slept)));
+      delay_ms = std::min(delay_ms * 2, 1000);
+    }
+    return -1;
+  }
+
+  // Re-establish server-side state after a reconnect: re-send SUBSCRIBE for
+  // every topic we hold a handler for. The daemon's KV watches are gone too, so
+  // drop the local cache — the next get() cold-fetches and re-registers the
+  // watch (values pushed only after re-watching would otherwise be missed).
+  void resubscribe() {
+    std::vector<std::string> topics;
+    {
+      std::lock_guard<std::mutex> lk(subs_mu_);
+      for (const auto &kv : subs_)
+        topics.push_back(kv.first);
+    }
+    for (const auto &t : topics)
+      send(ipc::MSG_SUBSCRIBE, t, nullptr, 0);
+    {
+      std::lock_guard<std::mutex> lk(kv_mu_);
+      kv_cache_.clear();
+      kv_watched_.clear();
+    }
   }
 
   std::string name_;
-  int fd_ = -1;
+  std::string path_;             // address to (re)connect to
+  bool started_ = false;         // connect() succeeded at least once
+  int fd_ = -1;                  // current socket, -1 during a reconnect window
   std::atomic<bool> running_{false};
-  std::mutex send_mu_;
+  std::atomic<bool> connected_{false};
+  std::mutex send_mu_;           // guards fd_ and serializes writes
 
   // rings_ + frame_drops_ before pool_: queued frame tasks touch them as the
   // pool drains during destruction, so they must outlive it.

@@ -5,9 +5,14 @@ current build is coherent and tested. Add each only when real use asks for it.
 
 ## Resilience (do this first if anything stays running)
 
-- [ ] **Client reconnect + resubscribe.** If the daemon restarts or a node
-      drops, subscriptions are lost with no recovery. Add a reconnect loop to
-      the client (C++ `Node`, Python `Node`) that re-sends every `SUBSCRIBE`.
+- [x] **Client reconnect + resubscribe.** Done: on a dropped connection the
+      reader thread (C++ `Node` and Python `Node`) reconnects to the same
+      address with exponential backoff and re-sends every `SUBSCRIBE`; publishes
+      during the gap are dropped, and get/sync don't block on a lost request.
+      The KV cache is invalidated on reconnect (next get() cold-fetches and
+      re-watches). Remaining: a bounded replay buffer so a reconnected node also
+      gets messages it *missed* while gone, not just resumed live delivery (see
+      the Streams item under "Borrow from Redis").
 - [x] **Startup ordering.** ~~A publish sent before its subscriber registers is
       dropped.~~ Done: opt-in retained messages — `publish(msg, retain=true)`
       stores a last-value the daemon replays on subscribe (MQTT-style). State
@@ -71,8 +76,10 @@ durability/HA (see *Resilience*, but mostly out of scope per above).
 
 - [ ] Thread-per-client + global locks. Fine for tens of nodes; move to epoll +
       sharded locks only if client count / fan-out throughput demands it.
-- [ ] Finished reader threads linger until shutdown (no reconnect churn in v1).
-      Add reaping if clients cycle a lot.
+- [ ] Finished client reader threads linger in `reader_threads_` until daemon
+      shutdown. Now that clients reconnect, a node that flaps accumulates dead
+      threads on the daemon — add reaping (join finished ones on accept) before
+      this runs long-lived with unstable clients.
 - [ ] KV: single global lock held across pushes. Add per-key versioning if it
       ever stalls under contention.
 

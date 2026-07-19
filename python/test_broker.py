@@ -87,5 +87,66 @@ def main():
             pass
 
 
+def _wait_socket(path, tries=100):
+    for _ in range(tries):
+        if os.path.exists(path):
+            return
+        time.sleep(0.02)
+
+
+def test_reconnect():
+    """Node survives a daemon restart: reconnects to the same address and
+    resubscribes, and delivery resumes."""
+    sock = os.path.join(tempfile.gettempdir(), f"broker_pyrc_{os.getpid()}.sock")
+    proc = subprocess.Popen([DAEMON, sock], stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    _wait_socket(sock)
+    try:
+        sub, pub = Node("sub"), Node("pub")
+        sub.connect(sock)
+        pub.connect(sock)
+        got = [0]
+        sub.subscribe("t", lambda p: got.__setitem__(0, got[0] + 1))
+        sub.sync()
+
+        pub.publish("t", b"x")
+        deadline = time.time() + 2
+        while got[0] == 0 and time.time() < deadline:
+            time.sleep(0.01)
+        assert got[0] == 1, got  # baseline works
+
+        # kill the daemon; nodes detect the drop and start reconnecting
+        proc.terminate()
+        proc.wait()
+        deadline = time.time() + 2
+        while (sub.connected() or pub.connected()) and time.time() < deadline:
+            time.sleep(0.01)
+        assert not sub.connected()  # observed the disconnect
+
+        # bring the daemon back on the same address
+        proc = subprocess.Popen([DAEMON, sock], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+        _wait_socket(sock)
+
+        before = got[0]
+        deadline = time.time() + 6
+        while got[0] == before and time.time() < deadline:
+            pub.publish("t", b"y")  # dropped until pub reconnects, then routed
+            time.sleep(0.02)
+        assert got[0] > before, "no delivery after reconnect"
+
+        sub.close()
+        pub.close()
+        print("python reconnect self-check OK")
+    finally:
+        proc.terminate()
+        proc.wait()
+        try:
+            os.unlink(sock)
+        except OSError:
+            pass
+
+
 if __name__ == "__main__":
     main()
+    test_reconnect()

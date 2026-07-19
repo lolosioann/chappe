@@ -7,6 +7,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -259,6 +260,51 @@ void test_retained_delivery() {
   ASSERT_EQ(s2.at(0).value, 9);         // newest retained value, not 7
 }
 
+// A node survives a daemon restart: after the daemon dies and a new one binds
+// the same address, the node reconnects and resubscribes, and delivery resumes.
+void test_reconnect_resubscribe() {
+  auto p = sock_path("reconnect");
+  auto server = std::make_unique<ipc::BrokerServer>(p);
+
+  Node sub("sub");
+  Node pub("pub");
+  sub.connect(p);
+  pub.connect(p);
+
+  std::atomic<int> got{0};
+  sub.subscribe([&](const Cmd &) { got.fetch_add(1); });
+  sub.sync();
+
+  pub.publish(Cmd{1});
+  for (int i = 0; i < 200 && got.load() == 0; i++)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  ASSERT_EQ(got.load(), 1); // baseline delivery works
+
+  // Kill the daemon; both nodes' readers detect the drop and start reconnecting.
+  server.reset();
+  for (int i = 0; i < 200 && (sub.connected() || pub.connected()); i++)
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  ASSERT_TRUE(!sub.connected()); // observed the disconnect
+
+  // Bring the daemon back on the same address.
+  server = std::make_unique<ipc::BrokerServer>(p);
+
+  // Once both have reconnected (and sub has resubscribed), a fresh publish must
+  // reach the handler. Retry to absorb the async reconnect/resubscribe ordering.
+  int before = got.load();
+  bool delivered = false;
+  for (int i = 0; i < 600 && !delivered; i++) {
+    pub.publish(Cmd{2}); // dropped until pub reconnects, then routed
+    for (int j = 0; j < 4 && !delivered; j++) {
+      if (got.load() > before)
+        delivered = true;
+      else
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+  }
+  ASSERT_TRUE(delivered); // resubscribed after reconnect, delivery resumed
+}
+
 // A frame whose declared length exceeds MAX_FRAME_BYTES must drop only that
 // connection, not crash the daemon — other clients keep working.
 void test_oversized_frame_drops_client() {
@@ -298,6 +344,8 @@ int main() {
   test_case("daemon-backed get/set with read-through cache", test_kv_store);
   test_case("get/set requires a connection", test_kv_requires_connection);
   test_case("retained publish replays to late subscriber", test_retained_delivery);
+  test_case("node reconnects and resubscribes after daemon restart",
+            test_reconnect_resubscribe);
   test_case("oversized frame drops client, not daemon",
             test_oversized_frame_drops_client);
   return test_summary();

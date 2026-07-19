@@ -77,6 +77,13 @@ sensor.publish(SensorState{.calibrated = true}, /*retain=*/true);
 in tests, but retained publishes are the real fix for the publish-before-subscribe
 race on state topics. Plain event/data streams stay non-retained.
 
+**Reconnect.** If the daemon restarts or a connection drops, a node's reader
+thread reconnects to the same address (exponential backoff) and re-sends its
+subscriptions automatically — `connected()` reports the live state. Publishes
+during the gap are dropped and the KV cache is invalidated (the next `get()`
+re-fetches); a node does not yet replay messages it *missed* while disconnected,
+only resumes live delivery. Same behavior in the C++ and Python clients.
+
 ### Frames (shared memory)
 
 Only the lightweight metadata (`FrameHandle`: timestamp, width, height, stride)
