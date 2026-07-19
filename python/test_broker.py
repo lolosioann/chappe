@@ -94,6 +94,40 @@ def _wait_socket(path, tries=100):
         time.sleep(0.02)
 
 
+def test_patterns():
+    """Wildcard pattern subscriptions: '+' one level, '*' the rest."""
+    sock = os.path.join(tempfile.gettempdir(), f"broker_pypat_{os.getpid()}.sock")
+    proc = subprocess.Popen([DAEMON, sock], stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    _wait_socket(sock)
+    try:
+        with Node("pub") as pub, Node("sub") as sub:
+            pub.connect(sock)
+            sub.connect(sock)
+            star_hits, plus_hits = [], []
+            sub.subscribe_pattern("cam/*", lambda t, p: star_hits.append(t))
+            sub.subscribe_pattern("cam/+", lambda t, p: plus_hits.append(t))
+            sub.sync()
+
+            for topic in ("cam/front", "cam/front/left", "lidar/top"):
+                pub.publish(topic, b"x")
+            deadline = time.time() + 2
+            while len(star_hits) < 2 and time.time() < deadline:
+                time.sleep(0.01)
+            time.sleep(0.05)
+
+            assert sorted(star_hits) == ["cam/front", "cam/front/left"], star_hits
+            assert plus_hits == ["cam/front"], plus_hits  # single level only
+        print("python pattern self-check OK")
+    finally:
+        proc.terminate()
+        proc.wait()
+        try:
+            os.unlink(sock)
+        except OSError:
+            pass
+
+
 def test_reconnect():
     """Node survives a daemon restart: reconnects to the same address and
     resubscribes, and delivery resumes."""
@@ -149,4 +183,5 @@ def test_reconnect():
 
 if __name__ == "__main__":
     main()
+    test_patterns()
     test_reconnect()

@@ -62,8 +62,9 @@ private:
   struct Client {
     int fd;
     std::mutex send_mu;
-    std::set<std::string> topics; // subscribed topics — for disconnect cleanup
-    std::set<std::string> keys;   // watched kv keys — for disconnect cleanup
+    std::set<std::string> topics;   // exact subscriptions — for disconnect cleanup
+    std::set<std::string> patterns; // wildcard subscriptions — same
+    std::set<std::string> keys;     // watched kv keys — for disconnect cleanup
     explicit Client(int f) : fd(f) {}
   };
   using ClientPtr = std::shared_ptr<Client>;
@@ -96,6 +97,12 @@ private:
   void handle_frame(const ClientPtr &c, const Frame &f) {
     switch (f.kind) {
     case MSG_SUBSCRIBE: {
+      if (topic_has_wildcard(f.name)) {
+        std::unique_lock<std::shared_mutex> lk(subs_mu_);
+        pattern_subs_[f.name].insert(c);
+        c->patterns.insert(f.name);
+        break; // no retained replay for patterns (see route_publish note)
+      }
       {
         std::unique_lock<std::shared_mutex> lk(subs_mu_);
         subs_[f.name].insert(c);
@@ -123,10 +130,17 @@ private:
     }
     case MSG_UNSUBSCRIBE: {
       std::unique_lock<std::shared_mutex> lk(subs_mu_);
-      auto it = subs_.find(f.name);
-      if (it != subs_.end())
-        it->second.erase(c);
-      c->topics.erase(f.name);
+      if (topic_has_wildcard(f.name)) {
+        auto it = pattern_subs_.find(f.name);
+        if (it != pattern_subs_.end())
+          it->second.erase(c);
+        c->patterns.erase(f.name);
+      } else {
+        auto it = subs_.find(f.name);
+        if (it != subs_.end())
+          it->second.erase(c);
+        c->topics.erase(f.name);
+      }
       break;
     }
     case MSG_PUBLISH:
@@ -189,6 +203,11 @@ private:
         if (it != subs_.end())
           it->second.erase(c);
       }
+      for (const auto &p : c->patterns) {
+        auto it = pattern_subs_.find(p);
+        if (it != pattern_subs_.end())
+          it->second.erase(c);
+      }
     }
     {
       std::lock_guard<std::mutex> lk(kv_mu_);
@@ -212,19 +231,25 @@ private:
       }
   }
 
-  // Fan a publish out to every subscriber of the topic except the sender.
+  // Fan a publish out to every subscriber of the topic except the sender —
+  // exact subscribers plus any pattern subscriber whose wildcard matches. A set
+  // dedupes so a client subscribed both ways gets a single copy.
+  // ponytail: patterns are matched by a linear scan per publish. Fine for a
+  // handful; build a level-trie if pattern count ever gets large.
   void route_publish(const ClientPtr &c, const Frame &f) {
-    std::vector<ClientPtr> targets; // snapshot keeps subscribers alive
+    std::set<ClientPtr> targets; // keeps subscribers alive + dedupes
     {
       std::shared_lock<std::shared_mutex> lk(subs_mu_);
       auto it = subs_.find(f.name);
       if (it != subs_.end())
-        for (const auto &s : it->second)
-          if (s.get() != c.get()) // noLocal: don't echo to the publisher
-            targets.push_back(s);
+        targets.insert(it->second.begin(), it->second.end());
+      for (const auto &ps : pattern_subs_)
+        if (topic_matches(ps.first, f.name))
+          targets.insert(ps.second.begin(), ps.second.end());
     }
     for (const auto &t : targets)
-      send_to(*t, MSG_PUBLISH, f.name, f.payload.data(), f.payload.size());
+      if (t.get() != c.get()) // noLocal: don't echo to the publisher
+        send_to(*t, MSG_PUBLISH, f.name, f.payload.data(), f.payload.size());
   }
 
   void send_to(Client &c, uint8_t kind, const std::string &name,
@@ -243,8 +268,9 @@ private:
   std::vector<ClientPtr> clients_;
   std::vector<std::thread> reader_threads_; // joined at shutdown
 
-  std::shared_mutex subs_mu_;
+  std::shared_mutex subs_mu_; // guards both subs_ and pattern_subs_
   std::unordered_map<std::string, std::set<ClientPtr>> subs_;
+  std::unordered_map<std::string, std::set<ClientPtr>> pattern_subs_;
 
   // Last-value per topic, for topics published with MSG_PUBLISH_RETAIN. Its own
   // lock so the publish hot path keeps routing under a shared_lock.

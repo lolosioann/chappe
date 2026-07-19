@@ -35,6 +35,26 @@ _FRAME = struct.Struct("=QIII4x")
 FrameMeta = namedtuple("FrameMeta", "timestamp_ns width height stride")
 
 
+def _has_wildcard(s):
+    return "+" in s or "*" in s
+
+
+def _topic_matches(pattern, topic):
+    """Bash-path-like match over '/'-separated levels: '+' one level, '*' the
+    rest. Mirrors ipc::topic_matches in include/ipc/transport.hpp."""
+    p, t = pattern.split("/"), topic.split("/")
+    for i, level in enumerate(p):
+        if level == "*":
+            return True
+        if i >= len(t):
+            return False
+        if level == "+":
+            continue
+        if level != t[i]:
+            return False
+    return len(p) == len(t)
+
+
 def default_broker_addr():
     return os.environ.get("BROKER_SOCKET", "/tmp/broker.sock")
 
@@ -52,6 +72,7 @@ class Node:
         self._running = False
         self._send_lock = threading.Lock()  # guards _sock, serializes sends
         self._subs = {}                 # topic -> list of handler(bytes)
+        self._pattern_subs = {}         # pattern -> list of handler(topic, bytes)
         self._subs_lock = threading.Lock()
         self._cache = {}                # key -> bytes
         self._watched = set()           # keys we receive pushes for
@@ -127,6 +148,18 @@ class Node:
             handlers.append(handler)
         if first:
             self._send(_SUBSCRIBE, topic.encode(), b"")
+
+    def subscribe_pattern(self, pattern, handler):
+        """Subscribe to a wildcard pattern ('/'-separated levels; '+' one level,
+        '*' the rest). The handler gets (topic, payload) since a pattern spans
+        topics."""
+        self._require_connected()
+        with self._subs_lock:
+            handlers = self._pattern_subs.setdefault(pattern, [])
+            first = not handlers
+            handlers.append(handler)
+        if first:
+            self._send(_SUBSCRIBE, pattern.encode(), b"")
 
     def sync(self, timeout=5.0):
         """Round-trip barrier: returns once the daemon has processed every frame
@@ -337,7 +370,7 @@ class Node:
     # the next get() cold-fetches and re-registers the watch.
     def _resubscribe(self):
         with self._subs_lock:
-            topics = list(self._subs.keys())
+            topics = list(self._subs.keys()) + list(self._pattern_subs.keys())
         for t in topics:
             self._send(_SUBSCRIBE, t.encode(), b"")
         with self._kv_lock:
@@ -347,11 +380,18 @@ class Node:
     def _dispatch(self, topic, payload):
         with self._subs_lock:
             handlers = list(self._subs.get(topic, ()))
+            pmatched = [h for pat, hs in self._pattern_subs.items()
+                        if _topic_matches(pat, topic) for h in hs]
         for handler in handlers:
             try:
                 handler(payload)
             except Exception:
                 pass  # a bad handler must not kill the reader thread
+        for handler in pmatched:
+            try:
+                handler(topic, payload)  # pattern handlers also get the topic
+            except Exception:
+                pass
 
     def _on_kv_reply(self, key, payload):
         if len(payload) < 5:

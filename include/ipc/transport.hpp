@@ -100,6 +100,50 @@ enum : uint8_t {
 // real frames are KB-scale; 64 MB is pure headroom.
 static constexpr uint32_t MAX_FRAME_BYTES = 64u * 1024 * 1024;
 
+// ---- topic patterns -------------------------------------------------------
+// Bash-path-like wildcards over '/'-separated topic levels (e.g. "cam/front",
+// "sensor/imu/accel"): '+' matches exactly one level, '*' matches the remaining
+// levels (zero or more) and is only meaningful as the last level. A subscribe
+// whose topic contains a wildcard is a pattern sub; the same matcher runs on
+// the daemon (which subscribers to route to) and the client (which local
+// handlers to dispatch to).
+
+inline std::vector<std::string> topic_levels(const std::string &s) {
+  std::vector<std::string> out;
+  size_t start = 0;
+  while (true) {
+    size_t sep = s.find('/', start);
+    if (sep == std::string::npos) {
+      out.push_back(s.substr(start));
+      break;
+    }
+    out.push_back(s.substr(start, sep - start));
+    start = sep + 1;
+  }
+  return out;
+}
+
+inline bool topic_has_wildcard(const std::string &s) {
+  return s.find('+') != std::string::npos || s.find('*') != std::string::npos;
+}
+
+inline bool topic_matches(const std::string &pattern, const std::string &topic) {
+  auto p = topic_levels(pattern);
+  auto t = topic_levels(topic);
+  size_t i = 0;
+  for (; i < p.size(); ++i) {
+    if (p[i] == "*")
+      return true; // matches all remaining levels, including none
+    if (i >= t.size())
+      return false; // pattern has more levels than the topic
+    if (p[i] == "+")
+      continue; // matches exactly this one level
+    if (p[i] != t[i])
+      return false;
+  }
+  return i == t.size(); // both fully consumed
+}
+
 // ---- Unix socket helpers --------------------------------------------------
 // Transport is just a connected byte-stream fd; these produce one. Swap in a
 // TCP variant later without touching the client or daemon.

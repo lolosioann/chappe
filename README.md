@@ -84,6 +84,27 @@ during the gap are dropped and the KV cache is invalidated (the next `get()`
 re-fetches); a node does not yet replay messages it *missed* while disconnected,
 only resumes live delivery. Same behavior in the C++ and Python clients.
 
+**Wildcard subscriptions.** For hierarchical topics named with `/`
+(e.g. `cam/front`, `sensor/imu/accel`), `subscribe_pattern` matches a bash-path-
+like pattern: `+` matches one level, `*` matches the rest.
+
+```cpp
+// C++ — handler is untyped (a pattern spans message types): topic + raw bytes
+cams.subscribe_pattern("cam/*", [](const std::string &topic, const void *d, size_t n) {
+  /* decode based on `topic` */
+});
+```
+
+```python
+# Python — handler gets (topic, payload)
+node.subscribe_pattern("cam/+", lambda topic, payload: ...)  # one level under cam/
+```
+
+`cam/+` matches `cam/front` but not `cam/front/left`; `cam/*` matches both (and
+`cam` itself). Exact `subscribe`/`publish` are unchanged — patterns are matched
+by the daemon for routing and by the client for dispatch. Frame topics and
+retained replay don't participate in pattern matching (yet).
+
 ### Frames (shared memory)
 
 Only the lightweight metadata (`FrameHandle`: timestamp, width, height, stride)

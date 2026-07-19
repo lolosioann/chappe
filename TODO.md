@@ -29,7 +29,12 @@ current build is coherent and tested. Add each only when real use asks for it.
 
 ## Routing features
 
-- [ ] **Topic wildcards** (`sensor/#`, `sensor/+/temp`). Exact-match only today.
+- [x] **Topic wildcards.** Done: bash-path-like over '/'-separated levels —
+      `cam/+` (one level), `cam/*` (the rest). `subscribe_pattern()` in both
+      clients; the daemon matches patterns on publish, clients on dispatch.
+      Pattern handlers are untyped (topic + raw bytes). No retained replay for
+      patterns, and no wildcard frame subscriptions — noted as follow-ups if
+      needed. (For hierarchy, name topics with '/', e.g. `cam/front`.)
 - [ ] **Access control.** No auth on the socket — any local process can connect.
 
 ## Borrow from Redis

@@ -260,6 +260,60 @@ void test_retained_delivery() {
   ASSERT_EQ(s2.at(0).value, 9);         // newest retained value, not 7
 }
 
+// Wildcard pattern subscriptions: '+' matches one level, '*' the rest.
+void test_pattern_subscribe() {
+  auto p = sock_path("pattern");
+  ipc::BrokerServer server(p);
+  Node pub("pub");
+  Node sub("sub");
+  pub.connect(p);
+  sub.connect(p);
+
+  std::mutex m;
+  std::vector<std::string> star_hits, plus_hits;
+  // "cam/*" matches cam and everything under it; "cam/+" only one level under.
+  sub.subscribe_pattern("cam/*", [&](const std::string &topic, const char *, size_t) {
+    std::lock_guard<std::mutex> l(m);
+    star_hits.push_back(topic);
+  });
+  sub.subscribe_pattern("cam/+", [&](const std::string &topic, const char *, size_t) {
+    std::lock_guard<std::mutex> l(m);
+    plus_hits.push_back(topic);
+  });
+  sub.sync();
+
+  // Publish arbitrary topic strings (typed publish is exact-topic only) by
+  // sending raw PUBLISH frames.
+  auto raw_publish = [&](const std::string &topic) {
+    int fd = ipc::unix_connect(p);
+    ASSERT_TRUE(fd >= 0);
+    auto frame = ipc::build_frame(ipc::MSG_PUBLISH, topic, "x", 1);
+    ipc::write_full(fd, frame.data(), frame.size());
+    ::close(fd);
+  };
+  raw_publish("cam/front");        // matches cam/* and cam/+
+  raw_publish("cam/front/left");   // matches cam/* only (two levels under)
+  raw_publish("lidar/top");        // matches neither
+
+  auto count = [&](std::vector<std::string> &v, size_t n) {
+    for (int i = 0; i < 200; i++) {
+      { std::lock_guard<std::mutex> l(m); if (v.size() >= n) break; }
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    std::lock_guard<std::mutex> l(m);
+    return v.size();
+  };
+
+  ASSERT_EQ(count(star_hits, 2), (size_t)2); // cam/front + cam/front/left
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  {
+    std::lock_guard<std::mutex> l(m);
+    ASSERT_EQ(plus_hits.size(), (size_t)1); // only cam/front (single level)
+    ASSERT_EQ(plus_hits[0], std::string("cam/front"));
+    ASSERT_EQ(star_hits.size(), (size_t)2);
+  }
+}
+
 // A node survives a daemon restart: after the daemon dies and a new one binds
 // the same address, the node reconnects and resubscribes, and delivery resumes.
 void test_reconnect_resubscribe() {
@@ -344,6 +398,7 @@ int main() {
   test_case("daemon-backed get/set with read-through cache", test_kv_store);
   test_case("get/set requires a connection", test_kv_requires_connection);
   test_case("retained publish replays to late subscriber", test_retained_delivery);
+  test_case("wildcard pattern subscriptions", test_pattern_subscribe);
   test_case("node reconnects and resubscribes after daemon restart",
             test_reconnect_resubscribe);
   test_case("oversized frame drops client, not daemon",

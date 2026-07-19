@@ -32,6 +32,10 @@
 // wire_codec<T> is the payload.
 class Node {
   using Receiver = std::function<void(const char *, size_t)>;
+  // Pattern handlers are untyped: a wildcard spans message types, so the handler
+  // gets the concrete topic plus raw bytes and decodes based on the topic.
+  using PatternReceiver =
+      std::function<void(const std::string &, const char *, size_t)>;
   using KvPromise = std::promise<std::optional<std::vector<char>>>;
 
 public:
@@ -90,6 +94,22 @@ public:
   template <typename F> void subscribe(F &&handler) {
     using T = msg_t<std::decay_t<F>>;
     register_topic<T>(std::function<void(const T &)>(std::forward<F>(handler)));
+  }
+
+  // Subscribe to a wildcard pattern ('/'-separated levels, '+' = one level,
+  // '*' = the rest). The handler gets each matching message's concrete topic
+  // and raw bytes — untyped, since a pattern can span message types. Pool-aware
+  // like subscribe(). Regular pub/sub topics only (not frame rings).
+  template <typename F> void subscribe_pattern(const std::string &pattern, F &&handler) {
+    bool first;
+    {
+      std::lock_guard<std::mutex> lk(subs_mu_);
+      auto &v = pattern_subs_[pattern];
+      first = v.empty();
+      v.push_back(PatternReceiver(std::forward<F>(handler)));
+    }
+    if (first)
+      send(ipc::MSG_SUBSCRIBE, pattern, nullptr, 0);
   }
 
   // With retain=true the daemon keeps this as topic T's last value and replays
@@ -326,19 +346,30 @@ private:
 
   void dispatch(const std::string &name, std::vector<char> &payload) {
     std::vector<Receiver> fns;
+    std::vector<PatternReceiver> pfns; // pattern handlers matching this topic
     {
       std::lock_guard<std::mutex> lk(subs_mu_);
       auto it = subs_.find(name);
-      if (it == subs_.end())
-        return;
-      fns = it->second;
+      if (it != subs_.end())
+        fns = it->second;
+      for (const auto &ps : pattern_subs_)
+        if (ipc::topic_matches(ps.first, name))
+          pfns.insert(pfns.end(), ps.second.begin(), ps.second.end());
     }
+    if (fns.empty() && pfns.empty())
+      return;
     auto buf = std::make_shared<std::vector<char>>(std::move(payload));
     for (auto &fn : fns) {
       if (pool_)
         pool_->enqueue([fn, buf] { fn(buf->data(), buf->size()); });
       else
         fn(buf->data(), buf->size());
+    }
+    for (auto &fn : pfns) {
+      if (pool_)
+        pool_->enqueue([fn, name, buf] { fn(name, buf->data(), buf->size()); });
+      else
+        fn(name, buf->data(), buf->size());
     }
   }
 
@@ -472,6 +503,8 @@ private:
       std::lock_guard<std::mutex> lk(subs_mu_);
       for (const auto &kv : subs_)
         topics.push_back(kv.first);
+      for (const auto &kv : pattern_subs_) // wildcards resubscribe too
+        topics.push_back(kv.first);
     }
     for (const auto &t : topics)
       send(ipc::MSG_SUBSCRIBE, t, nullptr, 0);
@@ -497,8 +530,9 @@ private:
       std::make_unique<std::atomic<uint64_t>>(0);
   std::unique_ptr<ThreadPool> pool_;
 
-  std::mutex subs_mu_;
+  std::mutex subs_mu_; // guards subs_ and pattern_subs_
   std::unordered_map<std::string, std::vector<Receiver>> subs_;
+  std::unordered_map<std::string, std::vector<PatternReceiver>> pattern_subs_;
 
   std::mutex kv_mu_;
   std::unordered_map<std::string, std::vector<char>> kv_cache_;
