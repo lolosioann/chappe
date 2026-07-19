@@ -14,10 +14,10 @@
 #include <thread>
 
 struct Camera : ipc::FrameHandle {};
-MAKE_TOPIC(Camera, "cam.front");
+MAKE_TOPIC(Camera, "cam/front");
 
 int main() {
-  shm_unlink("/broker_cam.front"); // clear any stale segment from a prior run
+  shm_unlink("/broker_cam_front"); // clear any stale segment from a prior run
   ipc::BrokerServer broker;
 
   Node camera("camera");

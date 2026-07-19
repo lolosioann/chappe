@@ -130,9 +130,41 @@ void test_frame_drop_no_ring() {
   ASSERT_EQ(consumer.frame_drops(), (uint64_t)1);
 }
 
+struct AbandonCam : ipc::FrameHandle {};
+MAKE_TOPIC(AbandonCam, "cam/abandon");
+
+// A writer that throws mid-fill must return its slot to the free pool, not leak
+// it as WRITING. With a 2-slot ring, a leak would starve after two throws; with
+// the abandon path, any number of throwing publishes leave the ring usable.
+void test_frame_writer_throws_no_leak() {
+  clean("/broker_cam_abandon");
+  auto p = sock_path("abandon");
+  ipc::BrokerServer server(p);
+  Node producer("prod");
+  producer.connect(p);
+  producer.create_frame_ring<AbandonCam>(16, 2); // only 2 slots
+
+  for (int i = 0; i < 5; i++) {
+    bool threw = false;
+    try {
+      producer.publish_frame<AbandonCam>(
+          i, 1, 1, 1, [](void *, size_t) { throw std::runtime_error("boom"); });
+    } catch (const std::runtime_error &) {
+      threw = true; // writer ran and threw -> slot must have been abandoned
+    }
+    ASSERT_TRUE(threw); // if a leak starved the ring, acquire would return
+                        // false and the writer would never run (threw==false)
+  }
+
+  bool ok = producer.publish_frame<AbandonCam>(
+      99, 1, 1, 1, [](void *d, size_t n) { std::memset(d, 7, n); });
+  ASSERT_TRUE(ok); // ring still usable after five throwing publishes
+}
+
 int main() {
   test_case("frame sync publish/subscribe", test_frame_sync);
   test_case("frame async (threadpool)", test_frame_async);
   test_case("frame drop when no ring attached", test_frame_drop_no_ring);
+  test_case("throwing writer abandons its slot", test_frame_writer_throws_no_leak);
   return test_summary();
 }

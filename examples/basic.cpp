@@ -24,9 +24,9 @@ struct MotorCommand {
   float steering;
 };
 
-MAKE_TOPIC(IMUReading, "imu.reading");
-MAKE_TOPIC(LaneDetected, "lane.detected");
-MAKE_TOPIC(MotorCommand, "motor.command");
+MAKE_TOPIC(IMUReading, "imu/reading");
+MAKE_TOPIC(LaneDetected, "lane/detected");
+MAKE_TOPIC(MotorCommand, "motor/command");
 
 // ---- Main ------------------------------------------------------------------
 

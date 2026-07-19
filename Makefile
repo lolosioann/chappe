@@ -4,6 +4,16 @@ CC       := cc
 CFLAGS   := -std=c11 -pthread -Wall -Wextra -Iinclude
 BINDIR   := bin
 
+# install layout (override PREFIX / DESTDIR as usual):
+#   $(PREFIX)/bin/broker_daemon
+#   $(PREFIX)/lib/libshm_ring.so
+#   $(PREFIX)/include/broker/*.hpp,*.h  (+ ipc/)
+#   $(PREFIX)/lib/broker/python/*.py
+PREFIX ?= /usr/local
+DESTDIR ?=
+PUB_HEADERS := include/broker.hpp include/node.hpp include/broker_server.hpp \
+               include/threadpool.hpp include/shm_ring.h
+
 # Client (Node) headers. node.hpp pulls in the shm ring (frame API) and the
 # wire layer, so anything using Node depends on these and links shm_ring.o.
 CLIENT_DEPS := include/node.hpp include/broker.hpp include/threadpool.hpp \
@@ -22,7 +32,7 @@ SELF_EXAMPLES := $(BINDIR)/basic $(BINDIR)/keyvalue $(BINDIR)/frames
 IPC_EXAMPLES  := $(BINDIR)/producer $(BINDIR)/consumer
 ALL_EXAMPLES  := $(SELF_EXAMPLES) $(IPC_EXAMPLES)
 
-.PHONY: all test examples daemon libshm_ring clean \
+.PHONY: all test examples daemon libshm_ring install uninstall clean \
         test_threadpool test_node test_frame_ipc test_transport \
         test_shm_ring stress_shm_ring bench_shm_ring
 
@@ -146,6 +156,30 @@ examples: $(ALL_EXAMPLES) $(BINDIR)/broker_daemon
 	@echo "  ./$(BINDIR)/broker_daemon"
 	@echo "  ./$(BINDIR)/consumer"
 	@echo "  ./$(BINDIR)/producer"
+
+# ---- install ---------------------------------------------------------------
+
+install: $(BINDIR)/broker_daemon $(BINDIR)/libshm_ring.so
+	install -d $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/lib \
+	           $(DESTDIR)$(PREFIX)/include/broker/ipc \
+	           $(DESTDIR)$(PREFIX)/lib/broker/python
+	install -m 755 $(BINDIR)/broker_daemon  $(DESTDIR)$(PREFIX)/bin/
+	install -m 644 $(BINDIR)/libshm_ring.so $(DESTDIR)$(PREFIX)/lib/
+	install -m 644 $(PUB_HEADERS)           $(DESTDIR)$(PREFIX)/include/broker/
+	install -m 644 include/ipc/*.hpp        $(DESTDIR)$(PREFIX)/include/broker/ipc/
+	install -m 644 python/broker.py python/shm_ring.py \
+	                                        $(DESTDIR)$(PREFIX)/lib/broker/python/
+	@echo "installed to $(DESTDIR)$(PREFIX)"
+	@echo "  C++:    compile with -I$(PREFIX)/include/broker, link $(PREFIX)/lib/libshm_ring.so -lrt"
+	@echo "  Python: export PYTHONPATH=$(PREFIX)/lib/broker/python"
+	@echo "  daemon: $(PREFIX)/bin/broker_daemon"
+
+uninstall:
+	rm -f  $(DESTDIR)$(PREFIX)/bin/broker_daemon
+	rm -f  $(DESTDIR)$(PREFIX)/lib/libshm_ring.so
+	rm -rf $(DESTDIR)$(PREFIX)/include/broker
+	rm -rf $(DESTDIR)$(PREFIX)/lib/broker
+	@echo "uninstalled from $(DESTDIR)$(PREFIX)"
 
 # ---- clean -----------------------------------------------------------------
 

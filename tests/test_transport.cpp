@@ -223,6 +223,27 @@ void test_kv_requires_connection() {
   ASSERT_TRUE(threw);
 }
 
+// info() returns a daemon status snapshot reflecting current subscriptions,
+// patterns, and kv keys.
+void test_info() {
+  auto p = sock_path("info");
+  ipc::BrokerServer server(p);
+  Node a("a");
+  Node b("b");
+  a.connect(p);
+  b.connect(p);
+  b.subscribe([](const Cmd &) {});
+  b.subscribe_pattern("cam/*", [](const std::string &, const char *, size_t) {});
+  b.set<int32_t>("k", 1);
+  b.sync(); // b's SUBSCRIBE/KV_SET are processed before a queries
+
+  std::string s = a.info();
+  ASSERT_TRUE(s.find("clients: 2") != std::string::npos);
+  ASSERT_TRUE(s.find("cmd=1") != std::string::npos);       // exact topic listed
+  ASSERT_TRUE(s.find("patterns: 1") != std::string::npos); // one wildcard sub
+  ASSERT_TRUE(s.find("kv_keys: 1") != std::string::npos);
+}
+
 // Retained publish is replayed to a subscriber that joins AFTER it — the fix
 // for the publish-before-subscribe race. A non-retained publish is not.
 void test_retained_delivery() {
@@ -397,6 +418,7 @@ int main() {
   test_case("publish is not echoed to the publisher", test_transport_no_echo);
   test_case("daemon-backed get/set with read-through cache", test_kv_store);
   test_case("get/set requires a connection", test_kv_requires_connection);
+  test_case("info() reports daemon status", test_info);
   test_case("retained publish replays to late subscriber", test_retained_delivery);
   test_case("wildcard pattern subscriptions", test_pattern_subscribe);
   test_case("node reconnects and resubscribes after daemon restart",

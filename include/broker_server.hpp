@@ -190,9 +190,62 @@ private:
     case MSG_PING:
       send_to(*c, MSG_PONG, f.name, f.payload.data(), f.payload.size());
       break;
+    case MSG_INFO: {
+      if (f.payload.size() < 4)
+        break;
+      std::string text = build_info();
+      std::vector<char> pl(f.payload.begin(), f.payload.begin() + 4); // req_id
+      pl.insert(pl.end(), text.begin(), text.end());
+      send_to(*c, MSG_INFO, "", pl.data(), pl.size());
+      break;
+    }
     default:
       break;
     }
+  }
+
+  // Human-readable daemon status: client/subscription/retained/kv counts plus
+  // per-topic subscriber tallies. Read-only snapshot under the relevant locks.
+  std::string build_info() {
+    size_t nclients;
+    {
+      std::lock_guard<std::mutex> lk(clients_mu_);
+      nclients = clients_.size();
+    }
+    std::string topics_detail;
+    size_t ntopics = 0, nsubs = 0, npatterns = 0;
+    {
+      std::shared_lock<std::shared_mutex> lk(subs_mu_);
+      for (const auto &e : subs_) {
+        if (e.second.empty())
+          continue;
+        ntopics++;
+        nsubs += e.second.size();
+        topics_detail +=
+            "\n    " + e.first + "=" + std::to_string(e.second.size());
+      }
+      for (const auto &e : pattern_subs_)
+        if (!e.second.empty())
+          npatterns++;
+    }
+    size_t nretained;
+    {
+      std::lock_guard<std::mutex> lk(retained_mu_);
+      nretained = retained_.size();
+    }
+    size_t nkeys;
+    {
+      std::lock_guard<std::mutex> lk(kv_mu_);
+      nkeys = kv_.size();
+    }
+    std::string s;
+    s += "clients: " + std::to_string(nclients) + "\n";
+    s += "topics: " + std::to_string(ntopics) + " (" + std::to_string(nsubs) +
+         " subscriptions)" + topics_detail + "\n";
+    s += "patterns: " + std::to_string(npatterns) + "\n";
+    s += "retained: " + std::to_string(nretained) + "\n";
+    s += "kv_keys: " + std::to_string(nkeys);
+    return s;
   }
 
   void remove_client(const ClientPtr &c) {

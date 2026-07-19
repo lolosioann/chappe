@@ -28,6 +28,22 @@ make examples   # build + run examples/basic.cpp (runs an in-process daemon)
 
 Requires a C++17 compiler and `-lrt` (POSIX shm).
 
+## Install
+
+```sh
+sudo make install                 # -> /usr/local (PREFIX to override)
+make install PREFIX=~/.local      # or a user prefix, no sudo
+make uninstall                    # same PREFIX/DESTDIR removes it
+```
+
+Installs the `broker_daemon` binary, `libshm_ring.so`, the C++ headers under
+`include/broker/`, and the Python modules. It prints the exact flags; in short:
+
+- **C++:** `-I$PREFIX/include/broker`, link `$PREFIX/lib/libshm_ring.so -lrt`.
+- **Python:** `export PYTHONPATH=$PREFIX/lib/broker/python` (set `$BROKER_LIB`
+  if `libshm_ring.so` isn't on a standard path). Supports `DESTDIR` for staged
+  packaging.
+
 ## Run the daemon
 
 ```sh
@@ -45,7 +61,7 @@ Declare messages as plain types and give each a topic name:
 
 ```cpp
 struct IMUReading { float ax, ay, az; };
-MAKE_TOPIC(IMUReading, "imu.reading");
+MAKE_TOPIC(IMUReading, "imu/reading");   // '/'-separated for wildcard matching
 ```
 
 Then drive everything through `Node`.
@@ -114,7 +130,7 @@ A frame topic derives from `ipc::FrameHandle`:
 
 ```cpp
 struct FrontCam : ipc::FrameHandle {};
-MAKE_TOPIC(FrontCam, "cam.front");
+MAKE_TOPIC(FrontCam, "cam/front");
 
 // producer
 producer.create_frame_ring<FrontCam>(/*slot_size=*/w*h, /*num_slots=*/4);
@@ -145,6 +161,21 @@ the daemon and subscribes to future updates, so later `set`s by any node are
 pushed into the cache — subsequent reads are local with no round-trip. Unknown
 keys return `std::nullopt`.
 
+### Introspection
+
+`node.info()` returns a human-readable daemon status snapshot — connected
+clients, per-topic subscriber counts, pattern/retained/kv totals:
+
+```
+clients: 2
+topics: 2 (2 subscriptions)
+    motor/command=1
+    imu/reading=1
+patterns: 1
+retained: 0
+kv_keys: 2
+```
+
 ## Python
 
 `python/broker.py` is a Python client that speaks the same wire protocol, so
@@ -173,10 +204,10 @@ messages directly — a C++ `struct Tick { int seq; }` is `struct.pack("=i", seq
   so a Python node can read frames a C++ node produced and vice versa:
 
   ```python
-  cam.create_frame_ring("cam.front", w*h, 4)
-  cam.publish_frame("cam.front", ts, w, h, w, pixels)          # producer
-  vision.attach_frame_ring("cam.front")
-  vision.subscribe_frame("cam.front", lambda meta, view: ...)  # zero-copy view
+  cam.create_frame_ring("cam/front", w*h, 4)
+  cam.publish_frame("cam/front", ts, w, h, w, pixels)          # producer
+  vision.attach_frame_ring("cam/front")
+  vision.subscribe_frame("cam/front", lambda meta, view: ...)  # zero-copy view
   ```
 
 Self-checks: `make daemon libshm_ring` then `python3 python/test_broker.py` and

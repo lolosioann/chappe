@@ -77,6 +77,11 @@ def main():
                 assert seen.get("status") == b"ready", seen
                 assert "event" not in seen, seen
 
+            # info(): daemon status snapshot
+            status = a.info()
+            assert "clients:" in status, status
+            assert "kv_keys:" in status, status
+
         print("python client self-check OK")
     finally:
         proc.terminate()

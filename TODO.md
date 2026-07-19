@@ -59,10 +59,10 @@ structured/cross-host state and keep this on the hot path.
 - [ ] **Key TTL / expiry** (Redis `EXPIRE`). Turns the KV into a presence/
       heartbeat mechanism (write a key with a 2 s TTL; its absence = node gone)
       and bounds unbounded growth. Lazy + periodic sweep on the daemon.
-- [ ] **Introspection** (Redis `INFO`/`CLIENT LIST`). A read-only status frame:
-      connected clients, per-topic subscriber counts, message/drop counters.
-      A handful of lines; turns the daemon from a black box into something
-      debuggable.
+- [x] **Introspection** (Redis `INFO`). Done: `node.info()` returns a daemon
+      status snapshot — connected clients, per-topic subscriber counts, pattern/
+      retained/kv totals. C++ and Python. (Message/drop counters not tracked
+      yet — add if useful.)
 
 Already tracked elsewhere as Redis analogues: pattern pub/sub = `PSUBSCRIBE`
 (see *Topic wildcards*), socket auth = Redis `ACL` (see *Access control*),
@@ -90,9 +90,10 @@ durability/HA (see *Resilience*, but mostly out of scope per above).
 
 ## Frames
 
-- [ ] Producer has no abandon path: if a `publish_frame` writer throws mid-write,
-      the slot stays `WRITING` and is permanently skipped (`node.hpp`,
-      `src/shm_ring.c`). Add an abandon/reset for the write slot.
+- [x] Producer abandon path. Done: `shm_ring_abandon_slot` returns an
+      acquired-but-unpublished slot to the free pool; `publish_frame` calls it if
+      the writer throws (C++), and the Python `Ring.write` checks size before
+      acquiring — so a failed write no longer leaks a slot as `WRITING`.
 
 ## Python
 
@@ -101,4 +102,4 @@ durability/HA (see *Resilience*, but mostly out of scope per above).
 
 ## Housekeeping
 
-- [ ] CHANGELOG + tag a v1 release.
+- [x] LICENSE (MIT) + CHANGELOG for v1.0.0. Tag `v1.0.0` on the release commit.

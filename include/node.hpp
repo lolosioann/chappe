@@ -141,6 +141,23 @@ public:
     fut.get();
   }
 
+  // Query the daemon for a human-readable status snapshot (connected clients,
+  // per-topic subscriber counts, retained/kv totals). Empty string if not
+  // connected.
+  std::string info() {
+    require_connected();
+    uint32_t id = next_req_.fetch_add(1);
+    auto fut = register_pending(id);
+    char b[4];
+    std::memcpy(b, &id, 4);
+    if (!send(ipc::MSG_INFO, "", b, 4))
+      fulfill(id, std::nullopt);
+    auto reply = fut.get();
+    if (!reply)
+      return "";
+    return std::string(reply->begin(), reply->end());
+  }
+
   // ---- frame (shm) API ------------------------------------------------------
   // A frame topic is a message type deriving from ipc::FrameHandle, registered
   // with MAKE_TOPIC. The backing ring's shm name is derived from Topic<T>::name,
@@ -169,10 +186,8 @@ public:
 
   // Producer publish. `writer(void* data, size_t size)` fills the slot in place
   // (zero-copy). Returns false if every slot is held by a consumer (frame
-  // dropped). Throws if T has no ring registered.
-  // NOTE: if `writer` throws, the slot is never published and stays WRITING —
-  // the C layer has no abandon path, so that slot is permanently lost. Keep the
-  // writer effectively noexcept.
+  // dropped). Throws if T has no ring registered. If `writer` throws, the slot
+  // is returned to the free pool (not leaked) and the exception propagates.
   template <typename T, typename WriterFn>
   bool publish_frame(uint64_t timestamp_ns, uint32_t width, uint32_t height,
                      uint32_t stride, WriterFn &&writer) {
@@ -190,7 +205,12 @@ public:
     if (!handle.valid)
       return false; // genuinely starved — caller decides to retry or drop
 
-    std::forward<WriterFn>(writer)(handle.data, handle.size);
+    try {
+      std::forward<WriterFn>(writer)(handle.data, handle.size);
+    } catch (...) {
+      it->second.abandon(handle.idx); // don't leak the slot as WRITING
+      throw;
+    }
     it->second.publish(handle.idx);
 
     T msg{};
@@ -282,7 +302,15 @@ public:
 
 private:
   template <typename T> static std::string ring_shm_name() {
-    return std::string("/broker_") + Topic<T>::name; // POSIX shm: leading '/'
+    // POSIX shm names take a single leading '/'; a '/' inside the name would
+    // imply a nonexistent subdir. Topics may be '/'-hierarchical, so map inner
+    // '/' to '_'. ponytail: "cam/front" and "cam_front" would collide — don't
+    // name two topics that way.
+    std::string s = std::string("/broker_") + Topic<T>::name;
+    for (size_t i = 1; i < s.size(); i++)
+      if (s[i] == '/')
+        s[i] = '_';
+    return s;
   }
 
   void record_frame_drop() noexcept {
@@ -469,6 +497,13 @@ private:
           uint32_t id;
           std::memcpy(&id, f.payload.data(), 4);
           fulfill(id, std::nullopt);
+        }
+        break;
+      case ipc::MSG_INFO:
+        if (f.payload.size() >= 4) {
+          uint32_t id;
+          std::memcpy(&id, f.payload.data(), 4);
+          fulfill(id, std::vector<char>(f.payload.begin() + 4, f.payload.end()));
         }
         break;
       default:

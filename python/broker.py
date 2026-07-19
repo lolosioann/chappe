@@ -24,7 +24,7 @@ from concurrent.futures import Future
 
 # Frame kinds — must match the enum in include/ipc/transport.hpp.
 (_SUBSCRIBE, _UNSUBSCRIBE, _PUBLISH, _KV_SET, _KV_GET, _KV_REPLY, _KV_UPDATE,
- _PING, _PONG, _PUBLISH_RETAIN) = range(10)
+ _PING, _PONG, _PUBLISH_RETAIN, _INFO) = range(11)
 
 _U32 = struct.Struct("=I")  # native-endian u32, matching the C++ memcpy
 
@@ -171,6 +171,17 @@ class Node:
             self._fulfill(rid, None)  # disconnected: nothing to flush
         fut.result(timeout=timeout)
 
+    def info(self, timeout=5.0):
+        """Human-readable daemon status (clients, subscription counts, retained/
+        kv totals). Empty string if not connected."""
+        self._require_connected()
+        rid = self._next_id()
+        fut = self._register(rid)
+        if not self._send(_INFO, b"", _U32.pack(rid)):
+            self._fulfill(rid, None)
+        reply = fut.result(timeout=timeout)
+        return reply.decode() if reply else ""
+
     # ---- get/set -----------------------------------------------------------
 
     def set(self, key, value):
@@ -196,15 +207,20 @@ class Node:
     # rides the broker. Needs the ring lib (make libshm_ring). Interoperates
     # with C++ frame nodes on the same topic.
 
+    @staticmethod
+    def _ring_shm_name(topic):
+        # Match ring_shm_name() in node.hpp: leading '/', inner '/' -> '_'.
+        return "/broker_" + topic.replace("/", "_")
+
     def create_frame_ring(self, topic, slot_size, num_slots):
         """Producer: own the ring for `topic`."""
         from shm_ring import Ring
-        self._rings[topic] = Ring.create("/broker_" + topic, slot_size, num_slots)
+        self._rings[topic] = Ring.create(self._ring_shm_name(topic), slot_size, num_slots)
 
     def attach_frame_ring(self, topic):
         """Consumer: attach to the ring another node created for `topic`."""
         from shm_ring import Ring
-        self._rings[topic] = Ring.attach("/broker_" + topic)
+        self._rings[topic] = Ring.attach(self._ring_shm_name(topic))
 
     def publish_frame(self, topic, timestamp_ns, width, height, stride, data):
         """Write `data` into the ring zero-copy and announce it on the broker.
@@ -343,6 +359,8 @@ class Node:
                         self._cache[name] = payload
                 elif kind == _PONG and len(payload) >= 4:
                     self._fulfill(_U32.unpack(payload[:4])[0], None)
+                elif kind == _INFO and len(payload) >= 4:
+                    self._fulfill(_U32.unpack(payload[:4])[0], payload[4:])
         except OSError:
             pass  # socket error -> treat as disconnect
 

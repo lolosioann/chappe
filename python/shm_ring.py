@@ -11,14 +11,29 @@ import os
 _LIB = None
 
 
+def _lib_path():
+    """Locate libshm_ring.so: $BROKER_LIB, then the in-tree build, then the
+    default `make install` locations."""
+    env = os.environ.get("BROKER_LIB")
+    if env:
+        return env
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for c in (os.path.join(root, "bin", "libshm_ring.so"),  # in-tree build
+              "/usr/local/lib/libshm_ring.so",              # make install default
+              "/usr/lib/libshm_ring.so"):
+        if os.path.exists(c):
+            return c
+    return os.path.join(root, "bin", "libshm_ring.so")  # report in-tree path
+
+
 def _load():
     global _LIB
     if _LIB is not None:
         return _LIB
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    path = os.path.join(root, "bin", "libshm_ring.so")
+    path = _lib_path()
     if not os.path.exists(path):
-        raise RuntimeError(f"missing {path} — run `make libshm_ring`")
+        raise RuntimeError(f"missing libshm_ring.so — set $BROKER_LIB or run "
+                           f"`make libshm_ring` (looked for {path})")
     lib = ctypes.CDLL(path)
     P, I32, U32, SZ, CP = (ctypes.c_void_p, ctypes.c_int32, ctypes.c_uint32,
                            ctypes.c_size_t, ctypes.c_char_p)
@@ -71,12 +86,12 @@ class Ring:
     def write(self, data):
         """Producer: copy `data` into a fresh slot and publish. Returns False if
         every slot is held by a consumer (frame dropped)."""
+        size = self._lib.shm_ring_slot_size(self._ring)
+        if len(data) > size:  # check before acquiring so we never leak a slot
+            raise ValueError(f"frame {len(data)}B exceeds slot {size}B")
         idx = self._lib.shm_ring_acquire_slot(self._ring)
         if idx < 0:
             return False
-        size = self._lib.shm_ring_slot_size(self._ring)
-        if len(data) > size:
-            raise ValueError(f"frame {len(data)}B exceeds slot {size}B")
         addr = self._lib.shm_ring_slot_data(self._ring, idx)
         ctypes.memmove(addr, data, len(data))  # bulk copy; slice-assign is O(n) in Python
         self._lib.shm_ring_publish_slot(self._ring, idx)

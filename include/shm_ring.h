@@ -29,6 +29,8 @@ shm_ring_t *shm_ring_create(const char *name, size_t slot_size,
 // consumer (starved). Write payload via shm_ring_slot_data, then publish.
 int32_t shm_ring_acquire_slot(shm_ring_t *ring);
 void shm_ring_publish_slot(shm_ring_t *ring, int32_t idx);
+// Return an acquired-but-unpublished slot to the free pool (writer bailed out).
+void shm_ring_abandon_slot(shm_ring_t *ring, int32_t idx);
 
 // --- consumer side ---
 // Geometry (slot_size, num_slots) is read from the shared segment.

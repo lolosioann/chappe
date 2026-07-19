@@ -218,6 +218,15 @@ void shm_ring_publish_slot(shm_ring_t *ring, int32_t idx) {
                         memory_order_release);
 }
 
+void shm_ring_abandon_slot(shm_ring_t *ring, int32_t idx) {
+  // A WRITING slot the producer decided not to publish (e.g. the writer threw
+  // mid-fill). It was never published, so last_ready never pointed at it and no
+  // consumer can hold it — just return it to the free pool so it isn't skipped
+  // forever.
+  shm_slot_header_t *h = slot_header(ring, (uint32_t)idx);
+  atomic_store_explicit(&h->state, SLOT_FREE, memory_order_release);
+}
+
 int32_t shm_ring_retain_latest(shm_ring_t *ring) {
   for (int tries = 0; tries < SHM_RETAIN_TRIES; tries++) {
     uint32_t idx =

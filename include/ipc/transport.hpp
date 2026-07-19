@@ -91,6 +91,9 @@ enum : uint8_t {
   // retained last-value and replays it to future subscribers. Client->daemon
   // only; the daemon routes it onward (and replays it) as a plain MSG_PUBLISH.
   MSG_PUBLISH_RETAIN = 9,
+  // Introspection. Client->daemon: payload=[u32 req_id]. Daemon->client reply:
+  // payload=[u32 req_id][status text].
+  MSG_INFO = 10,
 };
 
 // Upper bound on a single frame's name or payload length. A peer sending a

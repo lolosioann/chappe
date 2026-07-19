@@ -109,8 +109,8 @@ public:
   // WRITING state protects it from reclaim until publish(), so this hands back
   // a raw index + pointer rather than a ShmSlotView. Returns valid=false when
   // every slot is genuinely held by a consumer (see acquire_slot's policy).
-  // NOTE: if the caller never publishes (e.g. throws mid-write), the slot stays
-  // WRITING and is permanently skipped — the C layer has no abandon path.
+  // If the caller can't publish (e.g. the writer throws), call abandon(idx) to
+  // return the slot to the free pool instead of leaking it as WRITING.
   struct WriteHandle {
     int32_t idx;
     void *data;
@@ -126,6 +126,9 @@ public:
   }
 
   void publish(int32_t idx) noexcept { shm_ring_publish_slot(ring_, idx); }
+
+  // Return an acquired slot to the free pool without publishing it.
+  void abandon(int32_t idx) noexcept { shm_ring_abandon_slot(ring_, idx); }
 
   // Consumer side. Refcount-guarded — safe to hold across the handler call.
   ShmSlotView retain_latest() noexcept {
