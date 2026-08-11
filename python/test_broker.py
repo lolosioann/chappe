@@ -99,6 +99,39 @@ def _wait_socket(path, tries=100):
         time.sleep(0.02)
 
 
+class Daemon:
+    """A broker_daemon on its own temp socket, as a context manager. Restartable
+    so a check can drop the link under its nodes."""
+
+    def __init__(self, tag):
+        self.sock = os.path.join(tempfile.gettempdir(),
+                                 f"broker_{tag}_{os.getpid()}.sock")
+        self.proc = None
+
+    def start(self):
+        self.proc = subprocess.Popen([DAEMON, self.sock],
+                                     stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL)
+        _wait_socket(self.sock)
+
+    def stop(self):
+        if self.proc is not None:
+            self.proc.terminate()
+            self.proc.wait()
+            self.proc = None
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.stop()
+        try:
+            os.unlink(self.sock)
+        except OSError:
+            pass
+
+
 def test_patterns():
     """Wildcard pattern subscriptions: '+' one level, '*' the rest."""
     sock = os.path.join(tempfile.gettempdir(), f"broker_pypat_{os.getpid()}.sock")
@@ -186,7 +219,29 @@ def test_reconnect():
             pass
 
 
+def test_subscribe_before_connect():
+    """Handlers may be registered before connect(), which flushes their
+    subscriptions to the daemon."""
+    with Daemon("pysbc") as d, Node("sub") as sub, Node("pub") as pub:
+        got, pat_hits = [], []
+        sub.subscribe("t", got.append)
+        sub.subscribe_pattern("cam/+", lambda t, p: pat_hits.append(t))
+        sub.connect(d.sock)
+        pub.connect(d.sock)
+        sub.sync()
+
+        pub.publish("t", b"x")
+        pub.publish("cam/front", b"y")
+        deadline = time.time() + 2
+        while (not got or not pat_hits) and time.time() < deadline:
+            time.sleep(0.01)
+        assert got == [b"x"], got
+        assert pat_hits == ["cam/front"], pat_hits
+    print("python subscribe-before-connect self-check OK")
+
+
 if __name__ == "__main__":
     main()
     test_patterns()
     test_reconnect()
+    test_subscribe_before_connect()

@@ -153,6 +153,24 @@ void test_publish_requires_connection() {
   ASSERT_TRUE(threw);
 }
 
+// A handler registered before connect() is flushed to the daemon by connect(),
+// so the first publish after it is routed here.
+void test_subscribe_before_connect() {
+  auto p = sock_path("presub");
+  ipc::BrokerServer server(p);
+  Node sub("sub");
+  Node pub("pub");
+
+  std::atomic<int> got{0};
+  sub.subscribe([&got](const Cmd &c) { got += c.value; }); // before connect()
+  sub.connect(p);
+  sub.sync(); // the flushed subscription is live before we publish
+  pub.connect(p);
+
+  pub.publish(Cmd{6});
+  ASSERT_TRUE(wait_until([&] { return got.load() == 6; }));
+}
+
 // The daemon drops a topic once its last subscriber disconnects.
 void test_topic_dropped_when_last_subscriber_leaves() {
   auto p = sock_path("reap");
@@ -209,6 +227,8 @@ int main() {
   test_case("async node dispatches on thread pool", test_node_async_dispatch);
   test_case("async node tears down cleanly", test_async_node_teardown_clean);
   test_case("publish requires a connection", test_publish_requires_connection);
+  test_case("subscribe before connect is flushed on connect",
+            test_subscribe_before_connect);
   test_case("topic is dropped when its last subscriber leaves",
             test_topic_dropped_when_last_subscriber_leaves);
   test_case("kv watcher entry is dropped when its last watcher leaves",

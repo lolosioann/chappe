@@ -86,9 +86,10 @@ class Node:
     # ---- lifecycle ---------------------------------------------------------
 
     def connect(self, addr=None):
-        """Connect to the daemon and start the reader. The initial connect must
-        succeed; if the link later drops, the reader reconnects to the same
-        address and resubscribes transparently."""
+        """Connect to the daemon and start the reader, flushing any subscription
+        registered beforehand. The initial connect must succeed; if the link
+        later drops, the reader reconnects to the same address and resubscribes
+        transparently."""
         if self._started:
             raise RuntimeError("node already connected")
         addr = addr or default_broker_addr()
@@ -100,6 +101,7 @@ class Node:
         self._running = True
         self._reader = threading.Thread(target=self._run, daemon=True)
         self._reader.start()
+        self._resubscribe()  # subscriptions registered before connect()
 
     def connected(self):
         """True while a live connection exists (False during a reconnect wait)."""
@@ -139,9 +141,10 @@ class Node:
         self._send(_PUBLISH_RETAIN if retain else _PUBLISH, topic.encode(), payload)
 
     def subscribe(self, topic, handler):
-        """Register handler(payload: bytes) for `topic`. Handlers run on the
-        reader thread, so keep them quick (or hand off to your own queue)."""
-        self._require_connected()
+        """Register handler(payload: bytes) for `topic`. Legal before connect(),
+        which flushes the subscription to the daemon. Without a handler pool
+        handlers run on the reader thread, so keep them quick (or hand off to
+        your own queue)."""
         with self._subs_lock:
             handlers = self._subs.setdefault(topic, [])
             first = not handlers
@@ -152,8 +155,7 @@ class Node:
     def subscribe_pattern(self, pattern, handler):
         """Subscribe to a wildcard pattern ('/'-separated levels; '+' one level,
         '*' the rest). The handler gets (topic, payload) since a pattern spans
-        topics."""
-        self._require_connected()
+        topics. Legal before connect(), like subscribe()."""
         with self._subs_lock:
             handlers = self._pattern_subs.setdefault(pattern, [])
             first = not handlers

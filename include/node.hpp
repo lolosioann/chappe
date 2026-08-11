@@ -68,9 +68,11 @@ public:
   Node &operator=(const Node &) = delete;
 
   // Connect to a broker daemon and start the reader thread. Defaults to the
-  // well-known address ($BROKER_SOCKET or /tmp/broker.sock). The initial connect
-  // must succeed (throws otherwise); if the connection later drops, the reader
-  // thread transparently reconnects to the same address and resubscribes.
+  // well-known address ($BROKER_SOCKET or /tmp/broker.sock). Handlers may be
+  // registered before connect() — their subscriptions are flushed to the daemon
+  // here. The initial connect must succeed (throws otherwise); if the connection
+  // later drops, the reader thread transparently reconnects to the same address
+  // and resubscribes.
   void connect(const std::string &path = ipc::default_broker_addr()) {
     if (started_)
       throw std::logic_error("node already connected");
@@ -83,6 +85,9 @@ public:
     connected_.store(true);
     running_.store(true);
     reader_ = std::thread([this] { run(); });
+    // Same job as after a reconnect: send SUBSCRIBE for everything already
+    // registered. The kv cache it clears is necessarily empty at first connect.
+    resubscribe();
   }
 
   // True while a live connection to the daemon exists (false during a reconnect
