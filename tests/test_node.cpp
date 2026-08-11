@@ -302,6 +302,67 @@ void test_unsubscribe_survives_reconnect() {
   ASSERT_EQ(cmds.load(), 0);
 }
 
+// del() erases the key in the daemon and pushes the deletion to watchers, whose
+// cached value goes from present to absent.
+void test_kv_delete() {
+  auto p = sock_path("kvdel");
+  auto server = std::make_unique<ipc::BrokerServer>(p);
+  Node a("a");
+  Node b("b");
+  a.connect(p);
+  b.connect(p);
+
+  a.set<int>("k", 5);
+  a.sync();
+  auto warm = b.get<int>("k"); // cold read: caches the value, starts watching
+  ASSERT_TRUE(warm.has_value());
+  ASSERT_EQ(*warm, 5);
+
+  a.del("k");
+  ASSERT_TRUE(wait_until([&] { return !b.get<int>("k").has_value(); }));
+
+  Node fresh("fresh"); // a node that never saw the key: cold read of a dead key
+  fresh.connect(p);
+  ASSERT_TRUE(!fresh.get<int>("k").has_value());
+
+  // b keeps watching, so its own cache is the answer: with the daemon gone
+  // there is nothing to round-trip to and the read still resolves to absent.
+  server.reset();
+  ASSERT_TRUE(wait_until([&] { return !b.connected(); }));
+  ASSERT_TRUE(!b.get<int>("k").has_value());
+}
+
+// clear_retained<T>() forgets the stored last-value: subscribers that join
+// after it are replayed nothing.
+void test_clear_retained() {
+  auto p = sock_path("clearret");
+  ipc::BrokerServer server(p);
+  Node pub("pub");
+  pub.connect(p);
+  pub.publish(Cmd{7}, /*retain=*/true);
+  pub.sync();
+
+  std::atomic<int> early{0};
+  {
+    Node late("late");
+    late.connect(p);
+    late.subscribe([&early](const Cmd &c) { early += c.value; });
+    ASSERT_TRUE(wait_until([&] { return early.load() == 7; })); // replayed
+  }
+  ASSERT_TRUE(pub.info().find("retained: 1") != std::string::npos);
+
+  pub.clear_retained<Cmd>();
+  pub.sync();
+  ASSERT_TRUE(pub.info().find("retained: 0") != std::string::npos);
+
+  std::atomic<int> after{0};
+  Node late2("late2");
+  late2.connect(p);
+  late2.subscribe([&after](const Cmd &) { after++; });
+  late2.sync(); // any replay would have been written before this PONG
+  ASSERT_EQ(after.load(), 0);
+}
+
 // ---- Main ------------------------------------------------------------------
 
 int main() {
@@ -322,5 +383,8 @@ int main() {
   test_case("unsubscribe stops delivery", test_unsubscribe);
   test_case("unsubscribe is not undone by a reconnect",
             test_unsubscribe_survives_reconnect);
+  test_case("kv delete clears the store and watchers' caches", test_kv_delete);
+  test_case("clear_retained stops the replay to late subscribers",
+            test_clear_retained);
   return test_summary();
 }

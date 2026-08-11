@@ -157,6 +157,19 @@ public:
          bytes.data(), bytes.size());
   }
 
+  // Forget T's retained last-value, so nodes subscribing from now on are
+  // replayed nothing. It is a zero-length retained publish, so current
+  // subscribers do see an empty publish: the default POD codec rejects 0 bytes
+  // so those handlers skip it, but codecs that accept 0 bytes
+  // (wire_codec<std::string>, wire_codec<std::vector<T>>, custom ones) fire
+  // with a default-constructed T.
+  template <typename T> void clear_retained() {
+    require_connected();
+    static_assert(Topic<T>::name != nullptr,
+                  "clear_retained<T> needs MAKE_TOPIC(T, \"...\")");
+    send(ipc::MSG_PUBLISH_RETAIN, Topic<T>::name, nullptr, 0);
+  }
+
   // Round-trip barrier: returns once the daemon has processed every frame this
   // node has sent so far. Handy after subscribe() to guarantee the daemon is
   // routing this node's topics before a peer starts publishing. Returns
@@ -297,6 +310,13 @@ public:
     std::vector<char> bytes;
     ipc::wire_codec<T>::encode(val, bytes);
     send(ipc::MSG_KV_SET, key, bytes.data(), bytes.size());
+  }
+
+  // Remove the key from the daemon's store. Every watcher (this node included)
+  // is pushed the deletion and drops its cached value.
+  void del(const std::string &key) {
+    require_connected();
+    send(ipc::MSG_KV_DEL, key, nullptr, 0);
   }
 
   template <typename T> std::optional<T> get(const std::string &key) {
@@ -523,6 +543,13 @@ private:
       case ipc::MSG_KV_UPDATE:
         handle_kv_update(f);
         break;
+      case ipc::MSG_KV_DEL: {
+        // Stay in kv_watched_: the cache is still authoritative for this key, so
+        // a later get() reads "absent" locally instead of round-tripping.
+        std::lock_guard<std::mutex> lk(kv_mu_);
+        kv_cache_.erase(f.name);
+        break;
+      }
       case ipc::MSG_PONG:
         if (f.payload.size() >= 4) {
           uint32_t id;

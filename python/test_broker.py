@@ -4,6 +4,7 @@
 Launches a broker_daemon on a temp socket and exercises pub/sub + get/set.
 """
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -11,6 +12,7 @@ import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import broker
 from broker import Node
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -295,9 +297,81 @@ def test_unsubscribe():
     print("python unsubscribe self-check OK")
 
 
+def test_kv_delete():
+    """delete() erases the key: watchers drop it without a round-trip, and a
+    cold reader sees it gone."""
+    with Daemon("pykvdel") as d, Node("a") as a, Node("b") as b:
+        a.connect(d.sock)
+        b.connect(d.sock)
+        a.set("k", b"v")
+        a.sync()
+        assert b.get("k") == b"v"  # cold read; b now watches k
+
+        a.delete("k")
+        deadline = time.time() + 2
+        while b.get("k") is not None and time.time() < deadline:
+            time.sleep(0.01)
+        assert b.get("k") is None  # warm read, served from the pushed deletion
+
+        with Node("cold") as cold:
+            cold.connect(d.sock)
+            assert cold.get("k") is None  # round-trips: really gone from the store
+    print("python kv delete self-check OK")
+
+
+def test_retained_clear():
+    """clear_retained() drops the topic's last value, so later subscribers are
+    replayed nothing."""
+    with Daemon("pyretain") as d, Node("pub") as pub:
+        pub.connect(d.sock)
+        pub.publish("status", b"ready", retain=True)
+        pub.sync()
+
+        with Node("late") as late:
+            late.connect(d.sock)
+            seen = []
+            late.subscribe("status", seen.append)
+            deadline = time.time() + 2
+            while not seen and time.time() < deadline:
+                time.sleep(0.01)
+            assert seen == [b"ready"], seen
+
+        pub.clear_retained("status")
+        pub.sync()
+        assert "retained: 0" in pub.info(), pub.info()
+
+        with Node("later") as later:
+            later.connect(d.sock)
+            seen = []
+            later.subscribe("status", seen.append)
+            later.sync()
+            time.sleep(0.05)  # let a (wrongly) replayed value arrive
+            assert seen == [], seen
+    print("python retained clear self-check OK")
+
+
+def test_protocol_parity():
+    """Cross-language parity: the Python frame kinds must be the same numbers as
+    the C++ enum they mirror. Every behavioural check above already runs the
+    Python wire encoding through the C++ daemon, so the one failure mode left is
+    the numbering drifting apart — and this catches it without a build step."""
+    header = os.path.join(ROOT, "include", "ipc", "transport.hpp")
+    with open(header) as f:
+        cpp = {m.group(1): int(m.group(2))
+               for m in re.finditer(r"^\s*MSG_(\w+) = (\d+),", f.read(), re.M)}
+    assert "KV_DEL" in cpp, cpp  # guards against the regex matching nothing
+    for name, value in sorted(cpp.items()):
+        assert getattr(broker, "_" + name, None) == value, \
+            f"MSG_{name}: C++ {value}, Python {getattr(broker, '_' + name, None)}"
+    print("python protocol parity self-check OK")
+
+
 if __name__ == "__main__":
     main()
     test_patterns()
     test_reconnect()
     test_subscribe_before_connect()
     test_unsubscribe()
+    test_kv_delete()
+    test_retained_clear()
+    test_protocol_parity()

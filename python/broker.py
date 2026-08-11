@@ -24,7 +24,7 @@ from concurrent.futures import Future
 
 # Frame kinds — must match the enum in include/ipc/transport.hpp.
 (_SUBSCRIBE, _UNSUBSCRIBE, _PUBLISH, _KV_SET, _KV_GET, _KV_REPLY, _KV_UPDATE,
- _PING, _PONG, _PUBLISH_RETAIN, _INFO) = range(11)
+ _PING, _PONG, _PUBLISH_RETAIN, _INFO, _KV_DEL) = range(12)
 
 _U32 = struct.Struct("=I")  # native-endian u32, matching the C++ memcpy
 
@@ -140,6 +140,13 @@ class Node:
         self._require_connected()
         self._send(_PUBLISH_RETAIN if retain else _PUBLISH, topic.encode(), payload)
 
+    def clear_retained(self, topic):
+        """Drop `topic`'s retained value, so late subscribers get nothing. Wire
+        form is a retained publish with an empty payload (the MQTT convention);
+        current subscribers still see that empty publish."""
+        self._require_connected()
+        self._send(_PUBLISH_RETAIN, topic.encode(), b"")
+
     def subscribe(self, topic, handler):
         """Register handler(payload: bytes) for `topic`. Legal before connect(),
         which flushes the subscription to the daemon. Without a handler pool
@@ -208,6 +215,12 @@ class Node:
     def set(self, key, value):
         self._require_connected()
         self._send(_KV_SET, key.encode(), value)
+
+    def delete(self, key):
+        """Erase `key` from the store; the daemon pushes the deletion to every
+        watcher. Named delete because `del` is a keyword (C++ is Node::del)."""
+        self._require_connected()
+        self._send(_KV_DEL, key.encode(), b"")
 
     def get(self, key, timeout=5.0):
         """Return the value bytes, or None if unset. First read of a key
@@ -378,6 +391,9 @@ class Node:
                     with self._kv_lock:
                         self._watched.add(name)
                         self._cache[name] = payload
+                elif kind == _KV_DEL:
+                    with self._kv_lock:  # stays watched, so a warm get() reads
+                        self._cache.pop(name, None)  # None without a round-trip
                 elif kind == _PONG and len(payload) >= 4:
                     self._fulfill(_U32.unpack(payload[:4])[0], None)
                 elif kind == _INFO and len(payload) >= 4:

@@ -76,6 +76,7 @@ template <typename T> struct wire_codec<std::vector<T>> {
 //   KV_GET                 name=key           payload=[u32 req_id]
 //   KV_REPLY               name=key           payload=[u32 req_id][u8 found][value]
 //   KV_UPDATE              name=key           payload=value bytes (push to watchers)
+//   KV_DEL                 name=key           payload=—  (both directions)
 //   PING/PONG              name=—             payload=[u32 req_id]  (round-trip barrier)
 enum : uint8_t {
   MSG_SUBSCRIBE = 0,
@@ -90,10 +91,15 @@ enum : uint8_t {
   // Like MSG_PUBLISH but the daemon also stores the payload as the topic's
   // retained last-value and replays it to future subscribers. Client->daemon
   // only; the daemon routes it onward (and replays it) as a plain MSG_PUBLISH.
+  // A zero-length payload clears the retained value instead of storing one
+  // (MQTT convention) and still routes onward as an empty publish.
   MSG_PUBLISH_RETAIN = 9,
   // Introspection. Client->daemon: payload=[u32 req_id]. Daemon->client reply:
   // payload=[u32 req_id][status text].
   MSG_INFO = 10,
+  // Client->daemon: erase the key, then push the same frame to its watchers.
+  // Daemon->client: the key is gone; drop the cached value but keep watching.
+  MSG_KV_DEL = 11,
 };
 
 // Upper bound on a single frame's name or payload length. A peer sending a

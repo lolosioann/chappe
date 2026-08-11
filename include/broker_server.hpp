@@ -154,9 +154,13 @@ private:
       break;
     case MSG_PUBLISH_RETAIN:
       route_publish(c, f);
-      { // store the last-value for replay to future subscribers
+      { // store the last-value for replay to future subscribers — or, with an
+        // empty payload, clear it (MQTT convention)
         std::lock_guard<std::mutex> lk(retained_mu_);
-        retained_[f.name].assign(f.payload.begin(), f.payload.end());
+        if (f.payload.empty())
+          retained_.erase(f.name);
+        else
+          retained_[f.name].assign(f.payload.begin(), f.payload.end());
       }
       break;
     case MSG_KV_SET: {
@@ -171,6 +175,15 @@ private:
         for (const auto &w : it->second)
           send_to(*w, MSG_KV_UPDATE, f.name, f.payload.data(),
                   f.payload.size());
+      break;
+    }
+    case MSG_KV_DEL: {
+      std::lock_guard<std::mutex> lk(kv_mu_); // same ordering story as KV_SET
+      kv_.erase(f.name);
+      auto it = watchers_.find(f.name);
+      if (it != watchers_.end())
+        for (const auto &w : it->second)
+          send_to(*w, MSG_KV_DEL, f.name, nullptr, 0);
       break;
     }
     case MSG_KV_GET: {
