@@ -163,6 +163,25 @@ class Node:
         if first:
             self._send(_SUBSCRIBE, pattern.encode(), b"")
 
+    def unsubscribe(self, topic):
+        """Drop every handler for `topic` and stop the daemon sending it. No-op
+        if not subscribed."""
+        # Delete the entry, don't just empty it: a lingering empty list would
+        # make _resubscribe() re-subscribe after a reconnect.
+        with self._subs_lock:
+            gone = self._subs.pop(topic, None)
+        if gone is None:
+            return
+        self._send(_UNSUBSCRIBE, topic.encode(), b"")
+
+    def unsubscribe_pattern(self, pattern):
+        """unsubscribe() for a wildcard pattern."""
+        with self._subs_lock:
+            gone = self._pattern_subs.pop(pattern, None)
+        if gone is None:
+            return
+        self._send(_UNSUBSCRIBE, pattern.encode(), b"")
+
     def sync(self, timeout=5.0):
         """Round-trip barrier: returns once the daemon has processed every frame
         sent so far (e.g. call after subscribe() before a peer publishes)."""

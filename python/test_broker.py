@@ -240,8 +240,64 @@ def test_subscribe_before_connect():
     print("python subscribe-before-connect self-check OK")
 
 
+def test_unsubscribe():
+    """unsubscribe()/unsubscribe_pattern() stop delivery daemon-side, and a
+    reconnect must not resurrect what was dropped."""
+    with Daemon("pyunsub") as d, Node("sub") as sub, Node("pub") as pub:
+        sub.connect(d.sock)
+        pub.connect(d.sock)
+        got, pat_hits, kept = [], [], []
+        sub.subscribe("t", got.append)
+        sub.subscribe_pattern("cam/+", lambda t, p: pat_hits.append(t))
+        sub.subscribe("keep", kept.append)  # control: never unsubscribed
+        sub.sync()
+
+        pub.publish("t", b"x")
+        pub.publish("cam/front", b"y")
+        deadline = time.time() + 2
+        while (not got or not pat_hits) and time.time() < deadline:
+            time.sleep(0.01)
+        assert got == [b"x"], got
+        assert pat_hits == ["cam/front"], pat_hits
+
+        sub.unsubscribe("t")
+        sub.unsubscribe_pattern("cam/+")
+        sub.sync()
+        # the daemon, not just the local handler table, must have forgotten them
+        status = sub.info()
+        assert "topics: 1 (1 subscriptions)" in status, status
+        assert "patterns: 0" in status, status
+
+        pub.publish("t", b"x2")
+        pub.publish("cam/front", b"y2")
+        pub.sync()
+        time.sleep(0.05)  # let a (wrongly) routed publish arrive
+        assert got == [b"x"], got
+        assert pat_hits == ["cam/front"], pat_hits
+
+        # restart the daemon so both nodes reconnect and _resubscribe() runs
+        d.stop()
+        deadline = time.time() + 2
+        while (sub.connected() or pub.connected()) and time.time() < deadline:
+            time.sleep(0.01)
+        assert not sub.connected()
+        d.start()
+
+        deadline = time.time() + 6
+        while not kept and time.time() < deadline:
+            pub.publish("keep", b"z")  # dropped until pub reconnects
+            time.sleep(0.02)
+        assert kept, "no delivery after reconnect"
+
+        status = sub.info()
+        assert "topics: 1 (1 subscriptions)" in status, status
+        assert "patterns: 0" in status, status
+    print("python unsubscribe self-check OK")
+
+
 if __name__ == "__main__":
     main()
     test_patterns()
     test_reconnect()
     test_subscribe_before_connect()
+    test_unsubscribe()

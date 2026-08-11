@@ -117,6 +117,32 @@ public:
       send(ipc::MSG_SUBSCRIBE, pattern, nullptr, 0);
   }
 
+  // Stop receiving T's topic: drops every local handler for it, not just one —
+  // the wire subscription is per-topic, so per-handler granularity isn't worth
+  // the bookkeeping. No-op if T was never subscribed.
+  template <typename T> void unsubscribe() {
+    static_assert(Topic<T>::name != nullptr,
+                  "unsubscribe needs MAKE_TOPIC(T, \"...\")");
+    {
+      // Erase the entry, not just its handlers: a lingering empty vector would
+      // make resubscribe() re-subscribe after a reconnect.
+      std::lock_guard<std::mutex> lk(subs_mu_);
+      if (!subs_.erase(Topic<T>::name))
+        return;
+    }
+    send(ipc::MSG_UNSUBSCRIBE, Topic<T>::name, nullptr, 0);
+  }
+
+  // unsubscribe() for a wildcard pattern — same all-handlers semantics.
+  void unsubscribe_pattern(const std::string &pattern) {
+    {
+      std::lock_guard<std::mutex> lk(subs_mu_);
+      if (!pattern_subs_.erase(pattern))
+        return;
+    }
+    send(ipc::MSG_UNSUBSCRIBE, pattern, nullptr, 0);
+  }
+
   // With retain=true the daemon keeps this as topic T's last value and replays
   // it to any node that subscribes later — use it for state/status topics a
   // late joiner needs the current value of. Default (retain=false) is classic
