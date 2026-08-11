@@ -132,13 +132,19 @@ private:
       std::unique_lock<std::shared_mutex> lk(subs_mu_);
       if (topic_has_wildcard(f.name)) {
         auto it = pattern_subs_.find(f.name);
-        if (it != pattern_subs_.end())
+        if (it != pattern_subs_.end()) {
           it->second.erase(c);
+          if (it->second.empty())
+            pattern_subs_.erase(it); // else a dead entry lingers forever
+        }
         c->patterns.erase(f.name);
       } else {
         auto it = subs_.find(f.name);
-        if (it != subs_.end())
+        if (it != subs_.end()) {
           it->second.erase(c);
+          if (it->second.empty())
+            subs_.erase(it);
+        }
         c->topics.erase(f.name);
       }
       break;
@@ -217,26 +223,23 @@ private:
     {
       std::shared_lock<std::shared_mutex> lk(subs_mu_);
       for (const auto &e : subs_) {
-        if (e.second.empty())
-          continue;
         ntopics++;
         nsubs += e.second.size();
         topics_detail +=
             "\n    " + e.first + "=" + std::to_string(e.second.size());
       }
-      for (const auto &e : pattern_subs_)
-        if (!e.second.empty())
-          npatterns++;
+      npatterns = pattern_subs_.size();
     }
     size_t nretained;
     {
       std::lock_guard<std::mutex> lk(retained_mu_);
       nretained = retained_.size();
     }
-    size_t nkeys;
+    size_t nkeys, nwatched;
     {
       std::lock_guard<std::mutex> lk(kv_mu_);
       nkeys = kv_.size();
+      nwatched = watchers_.size(); // keys with at least one live watcher
     }
     std::string s;
     s += "clients: " + std::to_string(nclients) + "\n";
@@ -244,7 +247,8 @@ private:
          " subscriptions)" + topics_detail + "\n";
     s += "patterns: " + std::to_string(npatterns) + "\n";
     s += "retained: " + std::to_string(nretained) + "\n";
-    s += "kv_keys: " + std::to_string(nkeys);
+    s += "kv_keys: " + std::to_string(nkeys) + "\n";
+    s += "kv_watchers: " + std::to_string(nwatched);
     return s;
   }
 
@@ -253,21 +257,33 @@ private:
       std::unique_lock<std::shared_mutex> lk(subs_mu_);
       for (const auto &t : c->topics) {
         auto it = subs_.find(t);
-        if (it != subs_.end())
+        if (it != subs_.end()) {
           it->second.erase(c);
+          // Drop the whole entry once nobody is left: an empty set would
+          // otherwise stay for the daemon's life, and route_publish's linear
+          // pattern scan would walk the dead pattern ones on every publish.
+          if (it->second.empty())
+            subs_.erase(it);
+        }
       }
       for (const auto &p : c->patterns) {
         auto it = pattern_subs_.find(p);
-        if (it != pattern_subs_.end())
+        if (it != pattern_subs_.end()) {
           it->second.erase(c);
+          if (it->second.empty())
+            pattern_subs_.erase(it);
+        }
       }
     }
     {
       std::lock_guard<std::mutex> lk(kv_mu_);
       for (const auto &k : c->keys) {
         auto it = watchers_.find(k);
-        if (it != watchers_.end())
+        if (it != watchers_.end()) {
           it->second.erase(c);
+          if (it->second.empty())
+            watchers_.erase(it);
+        }
       }
     }
     { // close under send_mu so no send_to races a reused fd

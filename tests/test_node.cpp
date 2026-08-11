@@ -153,6 +153,51 @@ void test_publish_requires_connection() {
   ASSERT_TRUE(threw);
 }
 
+// The daemon drops a topic once its last subscriber disconnects.
+void test_topic_dropped_when_last_subscriber_leaves() {
+  auto p = sock_path("reap");
+  ipc::BrokerServer server(p);
+  Node probe("probe");
+  probe.connect(p);
+  {
+    Node sub("sub");
+    sub.connect(p);
+    sub.subscribe([](const Cmd &) {});
+    sub.sync();
+    std::string s = probe.info();
+    ASSERT_TRUE(s.find("cmd=1") != std::string::npos);
+    ASSERT_TRUE(s.find("topics: 1") != std::string::npos);
+  } // sub disconnects; the daemon cleans up on its reader thread
+
+  ASSERT_TRUE(wait_until([&] {
+    std::string s = probe.info();
+    return s.find("cmd=") == std::string::npos &&
+           s.find("topics: 0") != std::string::npos;
+  }));
+}
+
+// Same for the kv side: a get() registers a watcher, and the entry must go when
+// its last watcher disconnects — not linger as an empty set for the daemon's
+// life. kv_watchers counts entries in watchers_, so it distinguishes the two.
+void test_watcher_dropped_when_last_watcher_leaves() {
+  auto p = sock_path("watchreap");
+  ipc::BrokerServer server(p);
+  Node probe("probe");
+  probe.connect(p);
+  probe.set<int>("k", 1);
+  {
+    Node watcher("watcher");
+    watcher.connect(p);
+    ASSERT_EQ(watcher.get<int>("k").value(), 1); // cold get starts the watch
+    ASSERT_TRUE(probe.info().find("kv_watchers: 1") != std::string::npos);
+  } // watcher disconnects
+
+  ASSERT_TRUE(wait_until([&] {
+    return probe.info().find("kv_watchers: 0") != std::string::npos;
+  }));
+  ASSERT_TRUE(probe.info().find("kv_keys: 1") != std::string::npos); // key stays
+}
+
 // ---- Main ------------------------------------------------------------------
 
 int main() {
@@ -164,5 +209,9 @@ int main() {
   test_case("async node dispatches on thread pool", test_node_async_dispatch);
   test_case("async node tears down cleanly", test_async_node_teardown_clean);
   test_case("publish requires a connection", test_publish_requires_connection);
+  test_case("topic is dropped when its last subscriber leaves",
+            test_topic_dropped_when_last_subscriber_leaves);
+  test_case("kv watcher entry is dropped when its last watcher leaves",
+            test_watcher_dropped_when_last_watcher_leaves);
   return test_summary();
 }
