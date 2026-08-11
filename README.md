@@ -79,6 +79,16 @@ vision.sync();              // ensure the subscription is live at the daemon
 sensor.publish(IMUReading{.ax = 0.1f});
 ```
 
+Handlers may also be registered *before* `connect()` — the subscriptions are
+flushed to the daemon when the connection comes up. To stop receiving a topic,
+`unsubscribe`; it drops every local handler for that topic, since the wire
+subscription is per-topic and not per-handler.
+
+```cpp
+vision.unsubscribe<IMUReading>();
+vision.unsubscribe_pattern("cam/*");
+```
+
 **Retained messages.** By default a subscriber only receives messages published
 while it was subscribed — a publish sent before it registers is lost. For
 state/status topics where a late joiner needs the current value, publish with
@@ -87,7 +97,13 @@ state/status topics where a late joiner needs the current value, publish with
 ```cpp
 sensor.publish(SensorState{.calibrated = true}, /*retain=*/true);
 // ...a node that subscribes later still gets that last value immediately.
+sensor.clear_retained<SensorState>();   // later subscribers get nothing again
 ```
+
+`clear_retained` goes out as a zero-length retained publish (MQTT convention),
+so *current* subscribers do see an empty publish: the default POD codec rejects
+0 bytes and those handlers skip it, but codecs that accept 0 bytes
+(`std::string`, `std::vector<T>`) fire with a default-constructed value.
 
 `sync()` (a round-trip barrier) is still useful to order setup deterministically
 in tests, but retained publishes are the real fix for the publish-before-subscribe
@@ -154,12 +170,17 @@ dropped); `frame_drops()` counts frames a subscriber couldn't retain.
 a.set<int>("gear", 3);              // writes the authoritative value in the daemon
 int g = b.get<int>("gear").value(); // first get round-trips + starts watching
 int h = b.get<int>("gear").value(); // subsequent gets read the local cache
+a.del("gear");                      // erases it; watchers drop their cached copy
 ```
 
 `get<T>` reads the local cache once warm. The first read of a key round-trips to
 the daemon and subscribes to future updates, so later `set`s by any node are
 pushed into the cache — subsequent reads are local with no round-trip. Unknown
 keys return `std::nullopt`.
+
+`del` erases the key in the daemon and pushes the deletion to every watcher. A
+watching node keeps watching, so its next `get` reports the key absent straight
+from the cache, with no round-trip.
 
 ### Introspection
 
@@ -174,7 +195,11 @@ topics: 2 (2 subscriptions)
 patterns: 1
 retained: 0
 kv_keys: 2
+kv_watchers: 1
 ```
+
+Counts are of live entries only: a topic, pattern or watched key disappears from
+the snapshot once its last subscriber/watcher disconnects.
 
 ## Python
 
@@ -199,6 +224,12 @@ Because it's the same wire format, a Python subscriber decodes a C++ node's
 messages directly — a C++ `struct Tick { int seq; }` is `struct.pack("=i", seq)`.
 
 - **pub/sub and get/set** are pure stdlib — no build, no dependencies.
+- **Same surface as C++** — `unsubscribe`/`unsubscribe_pattern`,
+  `clear_retained(topic)`, and `delete(key)` (spelled out, since `del` is a
+  keyword; the C++ name is `del`).
+- **Handler pool** — `Node("py", threads=4)` runs handlers on 4 workers instead
+  of the reader thread. The default (`threads=0`) runs them inline on the
+  reader, so keep them quick.
 - **Frames** work too, via `python/shm_ring.py`, a `ctypes` binding to the same
   C ring the C++ side uses (so `make libshm_ring` first). Same layout both ways,
   so a Python node can read frames a C++ node produced and vice versa:
@@ -234,13 +265,18 @@ relative, not absolute. A captured snapshot lives in [BENCHMARKS.md](BENCHMARKS.
   `key → {watchers}` set. It only ever sees `[kind][topic/key][opaque bytes]`;
   all typing (`MAKE_TOPIC`, `wire_codec`) stays on the clients. Fine for tens of
   long-lived nodes; a single global lock guards the store (see the ponytail
-  notes in the source for the ceilings).
+  notes in the source for the ceilings). Client sockets carry a 2 s
+  `SO_SNDTIMEO` and a failed write drops that client, so a consumer that stops
+  reading is disconnected instead of stalling the store indefinitely with the KV
+  lock held. That bounds the stall, it doesn't remove it: a slow-but-draining
+  consumer keeps every send making progress and still delays a `set` fan-out.
 
 - **Wire protocol** (`include/ipc/transport.hpp`) — one frame shape,
   `[u8 kind][u32 name_len][name][u32 payload_len][payload]`, native-endian
-  (same-host assumption). Kinds cover subscribe/publish, kv set/get/reply/update,
-  and a ping/pong barrier. `wire_codec<T>` handles trivially-copyable types as
-  raw bytes, with specializations for `std::string` and `std::vector<T>`.
+  (same-host assumption). Kinds cover subscribe/publish, kv
+  set/del/get/reply/update, and a ping/pong barrier. `wire_codec<T>` handles
+  trivially-copyable types as raw bytes, with specializations for `std::string`
+  and `std::vector<T>`.
 
 - **KV coherence** — the daemon serializes each store write and its pushes under
   one lock, and clients cache only from daemon-originated frames (reply + push),

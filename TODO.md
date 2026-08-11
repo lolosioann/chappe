@@ -56,9 +56,12 @@ structured/cross-host state and keep this on the hot path.
       last-writer-wins overwrite, so nodes can't do counters, locks, or barriers.
       The daemon already serializes the KV under one lock, so these are a few
       verbs, not a redesign. Unlocks leader election / sequencing / presence.
+      (Delete landed this pass — `del`/`delete`, `MSG_KV_DEL` — but it's another
+      blind write, not an atomic op.)
 - [ ] **Key TTL / expiry** (Redis `EXPIRE`). Turns the KV into a presence/
       heartbeat mechanism (write a key with a 2 s TTL; its absence = node gone)
-      and bounds unbounded growth. Lazy + periodic sweep on the daemon.
+      and bounds unbounded growth. Lazy + periodic sweep on the daemon. A key
+      can now be removed explicitly (`del`), but nothing expires on its own.
 - [x] **Introspection** (Redis `INFO`). Done: `node.info()` returns a daemon
       status snapshot — connected clients, per-topic subscriber counts, pattern/
       retained/kv totals. C++ and Python. (Message/drop counters not tracked
@@ -81,10 +84,16 @@ durability/HA (see *Resilience*, but mostly out of scope per above).
 
 - [ ] Thread-per-client + global locks. Fine for tens of nodes; move to epoll +
       sharded locks only if client count / fan-out throughput demands it.
-- [ ] Finished client reader threads linger in `reader_threads_` until daemon
-      shutdown. Now that clients reconnect, a node that flaps accumulates dead
-      threads on the daemon — add reaping (join finished ones on accept) before
-      this runs long-lived with unstable clients.
+- [x] **Reader-thread reaping.** Done: readers are `std::future<void>`s and the
+      accept loop drops the finished ones before starting a new one, so a
+      flapping client no longer leaks a thread per reconnect. Shutdown clears the
+      vector (a future's destructor is the join).
+- [ ] Slow-consumer handling is a *bound*, not a design: a 2 s `SO_SNDTIMEO` on
+      client sockets plus drop-on-write-failure keeps one wedged consumer from
+      stalling the daemon forever, but a slow-but-draining one still holds the KV
+      lock for the length of its writes. The upgrade path is a per-client outbox
+      thread with a bounded queue and an explicit drop policy — then no consumer
+      can delay a `set` fan-out at all.
 - [ ] KV: single global lock held across pushes. Add per-key versioning if it
       ever stalls under contention.
 
