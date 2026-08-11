@@ -454,6 +454,17 @@ void test_daemon_reaps_reader_threads() {
   ASSERT_TRUE(wait_until([&] { return vm_size_kb() < vm0 + 64 * 1024; }));
 }
 
+// A stopped daemon takes its socket file with it, instead of leaving one behind
+// per run.
+void test_socket_file_removed_on_shutdown() {
+  auto p = sock_path("unlink");
+  {
+    ipc::BrokerServer server(p);
+    ASSERT_TRUE(::access(p.c_str(), F_OK) == 0);
+  }
+  ASSERT_TRUE(::access(p.c_str(), F_OK) != 0);
+}
+
 // ---- Main ------------------------------------------------------------------
 
 int main() {
@@ -481,5 +492,7 @@ int main() {
             test_clear_retained);
   test_case("daemon reaps dead clients' reader threads",
             test_daemon_reaps_reader_threads);
+  test_case("daemon removes its socket file on shutdown",
+            test_socket_file_removed_on_shutdown);
   return test_summary();
 }

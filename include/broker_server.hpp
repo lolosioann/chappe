@@ -32,7 +32,8 @@ namespace ipc {
 // count or fan-out throughput actually demands it.
 class BrokerServer {
 public:
-  explicit BrokerServer(const std::string &path = default_broker_addr()) {
+  explicit BrokerServer(const std::string &path = default_broker_addr())
+      : path_(path) {
     listen_fd_ = unix_listen(path);
     if (listen_fd_ < 0)
       throw std::runtime_error("broker listen failed: " + path);
@@ -58,6 +59,10 @@ public:
     // is the join. Safe here: the accept thread is already joined, so this is
     // the only thread touching readers_.
     readers_.clear();
+    // Don't leave the socket file behind. unix_listen() already unlinks a stale
+    // path before binding, so the only loser is a second daemon that stole this
+    // address while we were running — it was already broken by that theft.
+    ::unlink(path_.c_str());
   }
 
   BrokerServer(const BrokerServer &) = delete;
@@ -375,6 +380,7 @@ private:
       ::shutdown(c.fd, SHUT_RDWR);
   }
 
+  std::string path_; // listen address, unlinked on shutdown
   int listen_fd_;
   std::atomic<bool> running_{false};
   std::thread accept_thread_;
