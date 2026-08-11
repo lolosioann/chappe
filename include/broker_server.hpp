@@ -13,6 +13,7 @@
 #include <vector>
 
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 namespace ipc {
@@ -69,6 +70,9 @@ private:
   };
   using ClientPtr = std::shared_ptr<Client>;
 
+  // How long a blocking write to a client may stall before we give up on it.
+  static constexpr int SEND_TIMEOUT_SEC = 2;
+
   void accept_loop() {
     while (running_.load()) {
       int cfd = unix_accept(listen_fd_);
@@ -77,6 +81,8 @@ private:
           break;
         continue;
       }
+      timeval tv{SEND_TIMEOUT_SEC, 0}; // bound how long a wedged peer can stall
+      ::setsockopt(cfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
       auto c = std::make_shared<Client>(cfd);
       std::lock_guard<std::mutex> lk(clients_mu_);
       clients_.push_back(c);
@@ -166,8 +172,15 @@ private:
     case MSG_KV_SET: {
       // Serialize the store write and its pushes under one lock so a watcher
       // observes SETs and its own GET reply in a single consistent order (a
-      // reply can't slip out after a later update). ponytail: global kv lock
-      // held across pushes — add per-key versioning if this ever stalls.
+      // reply can't slip out after a later update). That ordering guarantee is
+      // why the lock stays held across the pushes. SO_SNDTIMEO bounds each
+      // individual send(), not the whole frame: a watcher that reads nothing is
+      // dropped within a couple of timeouts, but one that drains slowly keeps
+      // every send making progress, so the stall is frame_size/drain_rate (and
+      // x watchers), not a fixed 2s.
+      // ponytail: bounded stall, not no stall. The real fix is a per-client
+      // outbox thread with a bounded queue and a drop policy — do that when any
+      // daemon-wide stall is too much, or once KV values stop being KB-scale.
       std::lock_guard<std::mutex> lk(kv_mu_);
       kv_[f.name].assign(f.payload.begin(), f.payload.end());
       auto it = watchers_.find(f.name);
@@ -338,8 +351,14 @@ private:
                const char *payload, size_t plen) {
     auto buf = build_frame(kind, name, payload, plen);
     std::lock_guard<std::mutex> lk(c.send_mu);
-    if (c.fd >= 0)
-      write_full(c.fd, buf.data(), buf.size());
+    if (c.fd < 0)
+      return;
+    if (!write_full(c.fd, buf.data(), buf.size()))
+      // Gone, or wedged past SEND_TIMEOUT_SEC — and a timed-out write may have
+      // emitted a partial frame, so that stream is desynced either way and
+      // dropping it is the only correct response. Shutdown unwinds the client's
+      // reader loop; remove_client() does the cleanup and owns the close.
+      ::shutdown(c.fd, SHUT_RDWR);
   }
 
   int listen_fd_;

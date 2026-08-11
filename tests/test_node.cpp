@@ -7,8 +7,11 @@
 #include <chrono>
 #include <memory>
 #include <string>
+#include <sys/socket.h>
+#include <sys/time.h>
 #include <thread>
 #include <unistd.h>
+#include <vector>
 
 // ---- Messages --------------------------------------------------------------
 
@@ -302,6 +305,58 @@ void test_unsubscribe_survives_reconnect() {
   ASSERT_EQ(cmds.load(), 0);
 }
 
+// A client that subscribes and then never reads must not wedge the daemon: its
+// blocked sends time out, it gets dropped, and healthy clients keep being
+// served throughout.
+void test_slow_consumer_dropped() {
+  auto p = sock_path("slow");
+  ipc::BrokerServer server(p);
+  Node probe("probe");
+  probe.connect(p);
+
+  // Raw client: subscribes to "wedge", watches "live", and reads nothing ever.
+  int wedged = ipc::unix_connect(p);
+  ASSERT_TRUE(wedged >= 0);
+  auto sf = ipc::build_frame(ipc::MSG_SUBSCRIBE, "wedge", nullptr, 0);
+  ipc::write_full(wedged, sf.data(), sf.size());
+  std::vector<char> req;
+  ipc::append_u32(req, 1); // req_id of a KV_GET whose reply is never read
+  auto gf = ipc::build_frame(ipc::MSG_KV_GET, "live", req.data(), req.size());
+  ipc::write_full(wedged, gf.data(), gf.size());
+  ASSERT_TRUE(wait_until(
+      [&] { return probe.info().find("wedge=1") != std::string::npos; }));
+
+  // Blast 4 MB at it, far past any socket buffer. Our own writes stall once the
+  // daemon's thread for them is stuck on the wedged peer, so bound them too.
+  std::thread blaster([&] {
+    int fd = ipc::unix_connect(p);
+    timeval tv{4, 0};
+    ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    std::vector<char> big(64 * 1024, 'x');
+    auto f =
+        ipc::build_frame(ipc::MSG_PUBLISH, "wedge", big.data(), big.size());
+    for (int i = 0; i < 64; i++)
+      if (!ipc::write_full(fd, f.data(), f.size()))
+        break;
+    ::close(fd);
+  });
+
+  // No deadlock: a kv round-trip still completes. "live" is watched by the
+  // wedged client, so this SET pushes to it while holding the store lock — a
+  // stall bounded by the send timeout instead of a permanent one.
+  probe.set<int>("live", 1);
+  auto v = probe.get<int>("live");
+  ASSERT_TRUE(v.has_value());
+  ASSERT_EQ(*v, 1);
+  blaster.join();
+
+  // ...and the wedged client is gone, leaving only probe.
+  ASSERT_TRUE(wait_until(
+      [&] { return probe.info().find("clients: 1") != std::string::npos; },
+      8000));
+  ::close(wedged);
+}
+
 // del() erases the key in the daemon and pushes the deletion to watchers, whose
 // cached value goes from present to absent.
 void test_kv_delete() {
@@ -383,6 +438,8 @@ int main() {
   test_case("unsubscribe stops delivery", test_unsubscribe);
   test_case("unsubscribe is not undone by a reconnect",
             test_unsubscribe_survives_reconnect);
+  test_case("slow consumer is dropped, daemon keeps serving",
+            test_slow_consumer_dropped);
   test_case("kv delete clears the store and watchers' caches", test_kv_delete);
   test_case("clear_retained stops the replay to late subscribers",
             test_clear_retained);
