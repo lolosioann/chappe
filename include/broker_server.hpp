@@ -1,7 +1,10 @@
 #pragma once
 #include "ipc/transport.hpp"
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstring>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -51,9 +54,10 @@ public:
           ::shutdown(c->fd, SHUT_RDWR);
       }
     }
-    for (auto &t : reader_threads_)
-      if (t.joinable())
-        t.join();
+    // An std::async future's destructor blocks until its task finishes — that
+    // is the join. Safe here: the accept thread is already joined, so this is
+    // the only thread touching readers_.
+    readers_.clear();
   }
 
   BrokerServer(const BrokerServer &) = delete;
@@ -83,12 +87,22 @@ private:
       }
       timeval tv{SEND_TIMEOUT_SEC, 0}; // bound how long a wedged peer can stall
       ::setsockopt(cfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+      // Reap finished readers so a flapping client doesn't leak one per
+      // reconnect. A ready future's destructor returns promptly. readers_ is
+      // touched only by this thread and by the destructor once this thread is
+      // joined — keep it that way and it needs no lock.
+      readers_.erase(std::remove_if(readers_.begin(), readers_.end(),
+                                    [](std::future<void> &r) {
+                                      return r.wait_for(std::chrono::seconds(
+                                                 0)) ==
+                                             std::future_status::ready;
+                                    }),
+                     readers_.end());
       auto c = std::make_shared<Client>(cfd);
       std::lock_guard<std::mutex> lk(clients_mu_);
       clients_.push_back(c);
-      // ponytail: finished reader threads linger here until server shutdown
-      // (no reconnect churn in v1). Add reaping if clients cycle a lot.
-      reader_threads_.emplace_back([this, c] { client_loop(c); });
+      readers_.push_back(
+          std::async(std::launch::async, [this, c] { client_loop(c); }));
     }
   }
 
@@ -367,7 +381,7 @@ private:
 
   std::mutex clients_mu_;
   std::vector<ClientPtr> clients_;
-  std::vector<std::thread> reader_threads_; // joined at shutdown
+  std::vector<std::future<void>> readers_; // accept thread only; see accept_loop
 
   std::shared_mutex subs_mu_; // guards both subs_ and pattern_subs_
   std::unordered_map<std::string, std::set<ClientPtr>> subs_;

@@ -5,6 +5,7 @@
 #include "test.hpp"
 #include <atomic>
 #include <chrono>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <sys/socket.h>
@@ -50,6 +51,21 @@ template <typename P> static bool wait_until(P pred, int timeout_ms = 2000) {
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
   }
   return pred();
+}
+
+// A thread that has exited leaves the task list immediately but keeps its 8 MB
+// stack mapped until it is joined, so the address space — not the live thread
+// count — is what an unjoined reader thread per dead client shows up as.
+static size_t vm_size_kb() {
+  std::ifstream f("/proc/self/status");
+  std::string key;
+  size_t kb = 0;
+  while (f >> key)
+    if (key == "VmSize:") {
+      f >> kb;
+      break;
+    }
+  return kb;
 }
 
 // ---- Tests -----------------------------------------------------------------
@@ -418,6 +434,26 @@ void test_clear_retained() {
   ASSERT_EQ(after.load(), 0);
 }
 
+// Reader threads of dead clients are joined, not accumulated: churn 30 client
+// lifecycles and the address space does not grow the way 30 retained thread
+// stacks would.
+void test_daemon_reaps_reader_threads() {
+  auto p = sock_path("threads");
+  ipc::BrokerServer server(p);
+  Node warm("warm");
+  warm.connect(p);
+  warm.sync();
+  size_t vm0 = vm_size_kb();
+
+  for (int i = 0; i < 31; i++) {
+    Node churn("churn"); // 31st connect sweeps the 30th's finished reader:
+    churn.connect(p);    // reaping runs on accept
+    churn.sync();        // the daemon is reading this client before it goes
+  }
+
+  ASSERT_TRUE(wait_until([&] { return vm_size_kb() < vm0 + 64 * 1024; }));
+}
+
 // ---- Main ------------------------------------------------------------------
 
 int main() {
@@ -443,5 +479,7 @@ int main() {
   test_case("kv delete clears the store and watchers' caches", test_kv_delete);
   test_case("clear_retained stops the replay to late subscribers",
             test_clear_retained);
+  test_case("daemon reaps dead clients' reader threads",
+            test_daemon_reaps_reader_threads);
   return test_summary();
 }
