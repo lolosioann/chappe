@@ -20,7 +20,7 @@ import struct
 import threading
 import time
 from collections import namedtuple
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 
 # Frame kinds — must match the enum in include/ipc/transport.hpp.
 (_SUBSCRIBE, _UNSUBSCRIBE, _PUBLISH, _KV_SET, _KV_GET, _KV_REPLY, _KV_UPDATE,
@@ -61,10 +61,13 @@ def default_broker_addr():
 
 class Node:
     """A broker client. One connection; a background reader thread delivers
-    incoming publishes to handlers and services kv replies."""
+    incoming publishes to handlers and services kv replies. With threads > 0
+    handlers run on a pool of that many workers instead of the reader thread,
+    so they run concurrently with each other and with further receives."""
 
-    def __init__(self, name):
+    def __init__(self, name, threads=0):
         self.name = name
+        self._pool = ThreadPoolExecutor(max_workers=threads) if threads else None
         self._sock = None               # current socket; None during reconnect
         self._addr = None               # address to (re)connect to
         self._started = False           # connect() succeeded at least once
@@ -117,6 +120,8 @@ class Node:
                     pass
         if self._reader is not None:
             self._reader.join()
+        if self._pool is not None:  # after the join (nothing new is submitted),
+            self._pool.shutdown(wait=True)  # before the rings handlers may hold
         with self._send_lock:
             if self._sock is not None:
                 self._sock.close()
@@ -438,15 +443,22 @@ class Node:
             pmatched = [h for pat, hs in self._pattern_subs.items()
                         if _topic_matches(pat, topic) for h in hs]
         for handler in handlers:
-            try:
-                handler(payload)
-            except Exception:
-                pass  # a bad handler must not kill the reader thread
+            self._invoke(handler, payload)
         for handler in pmatched:
+            self._invoke(handler, topic, payload)  # patterns also get the topic
+
+    def _invoke(self, handler, *args):
+        """Run a handler on the pool if there is one, else inline on the reader
+        thread. Never called under _subs_lock."""
+        def call():
             try:
-                handler(topic, payload)  # pattern handlers also get the topic
+                handler(*args)
             except Exception:
-                pass
+                pass  # a bad handler must not kill the reader thread or a worker
+        if self._pool is not None:
+            self._pool.submit(call)
+        else:
+            call()
 
     def _on_kv_reply(self, key, payload):
         if len(payload) < 5:

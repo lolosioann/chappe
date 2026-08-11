@@ -9,6 +9,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -350,6 +351,36 @@ def test_retained_clear():
     print("python retained clear self-check OK")
 
 
+def test_handler_pool():
+    """threads>0 runs handlers on a pool. The barrier only clears if two
+    invocations genuinely overlap — inline dispatch deadlocks it into a
+    timeout."""
+    with Daemon("pypool") as d, Node("sub", threads=2) as sub, Node("pub") as pub:
+        sub.connect(d.sock)
+        pub.connect(d.sock)
+        barrier = threading.Barrier(2)
+        got, overlapped = [], []
+
+        def handler(payload):
+            got.append(payload)
+            try:
+                barrier.wait(timeout=2)
+                overlapped.append(payload)
+            except threading.BrokenBarrierError:
+                pass
+
+        sub.subscribe("t", handler)
+        sub.sync()
+        pub.publish("t", b"1")
+        pub.publish("t", b"2")
+        deadline = time.time() + 3
+        while len(overlapped) < 2 and time.time() < deadline:
+            time.sleep(0.01)
+        assert sorted(got) == [b"1", b"2"], got
+        assert sorted(overlapped) == [b"1", b"2"], "handlers ran serially"
+    print("python handler pool self-check OK")
+
+
 def test_protocol_parity():
     """Cross-language parity: the Python frame kinds must be the same numbers as
     the C++ enum they mirror. Every behavioural check above already runs the
@@ -374,4 +405,5 @@ if __name__ == "__main__":
     test_unsubscribe()
     test_kv_delete()
     test_retained_clear()
+    test_handler_pool()
     test_protocol_parity()
