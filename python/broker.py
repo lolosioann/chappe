@@ -412,6 +412,13 @@ class Node:
                     except OSError:
                         pass
                     self._sock = None
+            with self._kv_lock:
+                # The daemon's watches died with the link, so the cache stops
+                # being authoritative here rather than after the reconnect: for
+                # a TTL'd key "still cached" would otherwise mean "still alive"
+                # for the whole outage.
+                self._cache.clear()
+                self._watched.clear()
             self._fail_pending()
             if not self._running:
                 return
@@ -473,16 +480,13 @@ class Node:
         return None
 
     # Re-establish server-side state after a reconnect: re-send SUBSCRIBE for
-    # every topic. The daemon's KV watches are gone, so drop the local cache —
-    # the next get() cold-fetches and re-registers the watch.
+    # every topic. The KV cache was already dropped when the link went down, so
+    # the next get() cold-fetches and re-registers its watch.
     def _resubscribe(self):
         with self._subs_lock:
             topics = list(self._subs.keys()) + list(self._pattern_subs.keys())
         for t in topics:
             self._send(_SUBSCRIBE, t.encode(), b"")
-        with self._kv_lock:
-            self._cache.clear()
-            self._watched.clear()
 
     def _dispatch(self, topic, payload):
         with self._subs_lock:

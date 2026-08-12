@@ -591,6 +591,15 @@ private:
           ::close(fd_);
         fd_ = -1;
       }
+      { // The daemon's watches died with the link, so the cache stops being
+        // authoritative here rather than after the reconnect: for a TTL'd key
+        // "still cached" would otherwise mean "still alive" for the whole
+        // outage. A get() in the window misses, fails to send, and reports the
+        // key absent — the safe answer for a heartbeat or a lock.
+        std::lock_guard<std::mutex> lk(kv_mu_);
+        kv_cache_.clear();
+        kv_watched_.clear();
+      }
       fail_pending();
       if (!running_.load())
         return;
@@ -679,8 +688,8 @@ private:
   }
 
   // Re-establish server-side state after a reconnect: re-send SUBSCRIBE for
-  // every topic we hold a handler for. The daemon's KV watches are gone too, so
-  // drop the local cache — the next get() cold-fetches and re-registers the
+  // every topic we hold a handler for. The KV cache was already dropped when
+  // the link went down, so the next get() cold-fetches and re-registers its
   // watch (values pushed only after re-watching would otherwise be missed).
   void resubscribe() {
     std::vector<std::string> topics;
@@ -693,11 +702,6 @@ private:
     }
     for (const auto &t : topics)
       send(ipc::MSG_SUBSCRIBE, t, nullptr, 0);
-    {
-      std::lock_guard<std::mutex> lk(kv_mu_);
-      kv_cache_.clear();
-      kv_watched_.clear();
-    }
   }
 
   std::string name_;
