@@ -280,6 +280,44 @@ Self-checks: `make daemon libshm_ring` then `python3 python/test_broker.py` and
 `python3 python/test_frames.py`. Demos (with a daemon running): `example.py`,
 `example_frames.py`.
 
+## Redis bridge
+
+`python/redis_bridge.py` mirrors the bus into Redis, so a monitoring app that
+already speaks Redis can watch the system's state and publish into it without
+learning our wire protocol:
+
+```sh
+python3 python/redis_bridge.py --key state/mode --key state/gear \
+                               --out 'telemetry/*' --in 'cmd/*'
+```
+
+It is an ordinary client — a separate process, no daemon changes, and nothing in
+the broker depends on Redis. Only the bridge needs `redis-py`.
+
+- **kv goes out only.** Mirrored keys are copied to `broker:<key>` byte for byte;
+  a delete or an expired TTL removes the Redis key. Nothing writes back, so
+  there is no loop to break and no conflict to resolve. A counter written by
+  `incr` stays 8 native-endian bytes, so it still reads back through
+  `get<int64_t>()` — `redis-cli` will show it as binary and Redis `INCR` won't
+  work on it; unpack it instead.
+- **Topics go both ways.** `--out` mirrors bus topics to `broker:<topic>`
+  channels, `--in` mirrors Redis channels back onto the bus. A topic that is
+  both still arrives exactly once: Redis echoes our own publish back to us, and
+  the bridge drops that copy. The other direction needs no such care because
+  `route_publish` is noLocal.
+- **Keys must be named explicitly.** The store has no enumeration and no
+  prefix-watch — a client starts watching a key by getting it — so the bridge
+  mirrors only the keys you pass with `--key`.
+- **Frames never cross.** A `FrameHandle` names a shared-memory segment on the
+  local host, so it is meaningless to a remote monitor. Don't put a frame topic
+  in `--out`.
+
+Losing Redis stops the bridge with a non-zero exit rather than reconnecting —
+run it under a supervisor. The bus side reconnects on its own, as any node does.
+
+Self-check: `python3 python/test_bridge.py` (skips cleanly without `redis-py` or
+a `redis-server` on PATH).
+
 ## Benchmarks
 
 ```sh

@@ -23,11 +23,33 @@ current build is coherent and tested. Add each only when real use asks for it.
 
 ## Transport reach
 
-- [ ] **TCP transport** for cross-host. Only `unix_connect`/`unix_listen` in
-      `include/ipc/transport.hpp` are socket-family-specific — swap those.
-- [ ] **Endianness.** Wire u32s and POD payloads are native-endian
-      (same-host/same-arch assumption). Move to network order before spanning
-      architectures.
+Cross-device is a *daemon per device*: each keeps its local unix socket (so
+frames stay zero-copy, latency stays local, and a partition leaves each device's
+own bus working), and devices are joined by out-of-process links. The daemon
+itself never learns TCP — which is also why its `SO_PEERCRED` uid gate survives
+intact.
+
+- [x] **Redis bridge** — done: `python/redis_bridge.py`, an ordinary client that
+      mirrors named kv keys out to Redis and topics both ways, for monitoring
+      apps that speak Redis. No daemon changes, no dependency added to the core.
+- [ ] **TCP primitives** — `tcp_connect`/`tcp_listen` in `transport.hpp`
+      (NODELAY, REUSEADDR, keepalive), used *only* by the link below. `Node` and
+      `BrokerServer` keep calling the unix ones.
+- [ ] **`broker_link`** — a C++ Node on the local bus, TCP to one peer link,
+      forwarding topics and keys chosen by the existing `topic_matches`
+      wildcards. Federated kv is eventually consistent with no cross-device
+      ordering, so keep one owning device per key; the link suppresses its own
+      echo the way the Redis bridge does. Refuses frame topics.
+- [ ] **Security for the link.** No `SO_PEERCRED` equivalent over TCP, and no
+      auth is planned: run links over WireGuard/SSH/a private VLAN. Say so in
+      the docs rather than shipping a token that looks like security.
+- [ ] **Payload portability.** Bigger than the endianness note it replaces:
+      `wire_codec<T>` ships raw struct bytes, so layout, padding *and* byte order
+      are all assumed identical across the link. Fine between identical builds;
+      document it, and serialize explicitly for anything else.
+- [ ] **Frames across devices** — a separate feature, not a link setting.
+      Forwarding pixels over TCP defeats the zero-copy design, so decide what it
+      should actually be before building it.
 
 ## Routing features
 

@@ -77,6 +77,13 @@
   daemon).
 
 ### Clients & tooling
+- **Redis bridge** — `python/redis_bridge.py` mirrors the bus into Redis for
+  monitoring apps that already speak it: named kv keys go out to `broker:<key>`
+  byte for byte (deletes and TTL expiry included), topics go both ways. A
+  separate process built on the existing Python client, so the daemon gains no
+  dependency and no code. Values are not translated — an `incr` counter stays 8
+  native-endian bytes rather than becoming a Redis decimal integer. Frames never
+  cross: a `FrameHandle` names local shared memory.
 - **Python handler pool** — `Node(name, threads=N)` runs handlers on N workers
   instead of the reader thread; the default (`threads=0`) keeps them inline.
 - **CI** — GitHub Actions workflow running the C++ suites and both Python
