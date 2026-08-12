@@ -9,6 +9,7 @@
 #include <memory>
 #include <string>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <thread>
 #include <unistd.h>
@@ -403,6 +404,205 @@ void test_kv_delete() {
   ASSERT_TRUE(!b.get<int>("k").has_value());
 }
 
+// A key set with a TTL is deleted by the daemon once it is due. The first get()
+// warms this node's cache before the deadline, so from then on nothing
+// round-trips: only a daemon that pushes the expiry out can make the reads flip
+// to absent.
+void test_kv_ttl_expires() {
+  auto p = sock_path("ttl");
+  ipc::BrokerServer server(p);
+  Node a("a");
+  a.connect(p);
+
+  a.set<int>("k", 7, std::chrono::milliseconds(500));
+  auto warm = a.get<int>("k"); // cold read, still well inside the TTL
+  ASSERT_TRUE(warm.has_value());
+  ASSERT_EQ(*warm, 7);
+
+  ASSERT_TRUE(wait_until([&] { return !a.get<int>("k").has_value(); }));
+}
+
+// A plain set clears an existing TTL (Redis semantics), so the key survives
+// well past the deadline it used to have.
+void test_plain_set_clears_ttl() {
+  auto p = sock_path("ttlclear");
+  ipc::BrokerServer server(p);
+  Node a("a");
+  a.connect(p);
+
+  a.set<int>("k", 1, std::chrono::milliseconds(500));
+  a.sync();
+  ASSERT_TRUE(a.info().find("kv_expiring: 1") != std::string::npos);
+  a.set<int>("k", 2);
+  a.sync();
+  ASSERT_TRUE(a.info().find("kv_expiring: 0") != std::string::npos);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(800));
+  auto v = a.get<int>("k");
+  ASSERT_TRUE(v.has_value());
+  ASSERT_EQ(v.value_or(0), 2); // value_or: a dropped key must FAIL, not abort
+}
+
+// The expiry reaches watchers the same way a del() does: a second node that
+// warm-cached the key reads it as absent afterwards, and since a watched key is
+// answered from the local cache that read never touches the daemon.
+void test_ttl_pushed_to_watchers() {
+  auto p = sock_path("ttlpush");
+  ipc::BrokerServer server(p);
+  Node a("a");
+  Node b("b");
+  a.connect(p);
+  b.connect(p);
+
+  a.set<std::string>("k", "v", std::chrono::milliseconds(500));
+  a.sync();
+  auto warm = b.get<std::string>("k"); // cold read: caches it, starts watching
+  ASSERT_TRUE(warm.has_value());
+  ASSERT_EQ(*warm, std::string("v"));
+
+  ASSERT_TRUE(wait_until([&] { return !b.get<std::string>("k").has_value(); }));
+}
+
+// A ttl the u32 wire field can't hold must not silently become a different one.
+// Both directions matter: 0 means "no ttl" to the daemon, so truncating to it
+// would store the key forever, and a cast of a negative ttl would take a ~49-day
+// lock — each the exact inverse of what the caller asked for.
+void test_out_of_range_ttl() {
+  auto p = sock_path("ttlrange");
+  ipc::BrokerServer server(p);
+  Node a("a");
+  a.connect(p);
+
+  a.set<int>("big", 1, std::chrono::milliseconds(5000000000LL)); // past a u32
+  a.sync();
+  ASSERT_TRUE(a.info().find("kv_expiring: 1") != std::string::npos);
+
+  a.setnx<int>("neg", 1, std::chrono::milliseconds(-1)); // no ttl, not a huge one
+  a.sync();
+  ASSERT_TRUE(a.info().find("kv_expiring: 1") != std::string::npos);
+}
+
+// While the link is down nothing can tell this node that a key expired or was
+// deleted, so the cache stops being authoritative the moment the link drops:
+// get() reports the key absent instead of the value it happens to still hold.
+// Otherwise a heartbeat key reads "alive" for a dead writer for a whole outage.
+void test_cache_dropped_while_disconnected() {
+  auto p = sock_path("kvdrop");
+  auto server = std::make_unique<ipc::BrokerServer>(p);
+  Node a("a");
+  a.connect(p);
+
+  a.set<int>("k", 7, std::chrono::milliseconds(500));
+  ASSERT_EQ(a.get<int>("k").value_or(0), 7); // cold read: now watched and cached
+
+  server.reset();
+  ASSERT_TRUE(wait_until([&] { return !a.connected(); }));
+  ASSERT_TRUE(!a.get<int>("k").has_value());
+}
+
+// incr counts an absent key as 0 and stores a plain int64 — the same bytes
+// get<int64_t>() decodes, so a counter is readable as an ordinary value.
+void test_incr() {
+  auto p = sock_path("incr");
+  ipc::BrokerServer server(p);
+  Node a("a");
+  a.connect(p);
+
+  ASSERT_EQ(a.incr("c").value_or(0), 1); // value_or: a miss must FAIL, not abort
+  ASSERT_EQ(a.incr("c", 5).value_or(0), 6);
+  ASSERT_EQ(a.get<int64_t>("c").value_or(0), 6);
+}
+
+// A value that isn't an 8-byte int64 is a type error, not something to coerce:
+// incr reports it and leaves the key exactly as it was.
+void test_incr_rejects_non_integer() {
+  auto p = sock_path("incrbad");
+  ipc::BrokerServer server(p);
+  Node a("a");
+  a.connect(p);
+
+  a.set<std::string>("k", "abc");
+  a.sync();
+  ASSERT_TRUE(!a.incr("k").has_value());
+  ASSERT_EQ(a.get<std::string>("k").value_or(""), std::string("abc"));
+}
+
+// incr goes through the same watcher fan-out as a set, so a second node that
+// warm-cached the key reads the new total with no round-trip of its own.
+void test_incr_updates_watchers() {
+  auto p = sock_path("incrwatch");
+  ipc::BrokerServer server(p);
+  Node a("a");
+  Node b("b");
+  a.connect(p);
+  b.connect(p);
+
+  ASSERT_EQ(a.incr("c").value_or(0), 1);
+  auto warm = b.get<int64_t>("c"); // cold read: caches it, starts watching
+  ASSERT_EQ(warm.value_or(0), 1);
+
+  a.incr("c", 41);
+  ASSERT_TRUE(wait_until([&] { return b.get<int64_t>("c").value_or(0) == 42; }));
+}
+
+// Exactly one node wins the key; the loser is told so and its value is not
+// written over the winner's.
+void test_setnx() {
+  auto p = sock_path("setnx");
+  ipc::BrokerServer server(p);
+  Node a("a");
+  Node b("b");
+  a.connect(p);
+  b.connect(p);
+
+  ASSERT_TRUE(a.setnx<std::string>("lock", "a"));
+  ASSERT_TRUE(!b.setnx<std::string>("lock", "b"));
+  ASSERT_EQ(b.get<std::string>("lock").value_or(""), std::string("a"));
+}
+
+// A holder that dies without releasing must not lock everyone out forever: the
+// ttl expires the key, and the next node acquires it.
+void test_setnx_ttl_releases() {
+  auto p = sock_path("setnxttl");
+  ipc::BrokerServer server(p);
+  Node a("a");
+  Node b("b");
+  a.connect(p);
+  b.connect(p);
+
+  ASSERT_TRUE(a.setnx<std::string>("lock", "a", std::chrono::milliseconds(500)));
+  ASSERT_TRUE(!b.setnx<std::string>("lock", "b"));
+  ASSERT_TRUE(wait_until([&] { return b.setnx<std::string>("lock", "b"); }));
+}
+
+// The kernel gate: the socket file is created private to the uid that bound it,
+// so nobody else can even open a connection to speak the protocol over.
+void test_socket_mode_is_private() {
+  auto p = sock_path("mode");
+  ipc::BrokerServer server(p);
+
+  struct stat st;
+  ASSERT_EQ(::stat(p.c_str(), &st), 0);
+  ASSERT_EQ(st.st_mode & 0777u, 0600u);
+}
+
+// The policy gate: with an explicit allow-list the socket mode has to be open
+// (or the listed uids could never reach the check), so connecting succeeds and
+// SO_PEERCRED is what turns us away — the daemon hangs up and the first read
+// sees EOF. A raw fd rather than a Node: a Node would reconnect-loop on this.
+void test_foreign_uid_rejected() {
+  auto p = sock_path("uid");
+  ipc::BrokerServer server(p, {::geteuid() + 1}); // guaranteed not to be us
+  int fd = ipc::unix_connect(p);
+  ASSERT_TRUE(fd >= 0);
+
+  timeval tv{2, 0}; // a daemon that lets us in must fail here, not hang
+  ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+  char b;
+  ASSERT_EQ(::recv(fd, &b, 1, 0), ssize_t(0));
+  ::close(fd);
+}
+
 // clear_retained<T>() forgets the stored last-value: subscribers that join
 // after it are replayed nothing.
 void test_clear_retained() {
@@ -488,6 +688,21 @@ int main() {
   test_case("slow consumer is dropped, daemon keeps serving",
             test_slow_consumer_dropped);
   test_case("kv delete clears the store and watchers' caches", test_kv_delete);
+  test_case("a key set with a ttl expires", test_kv_ttl_expires);
+  test_case("a plain set clears an existing ttl", test_plain_set_clears_ttl);
+  test_case("key expiry is pushed to watchers", test_ttl_pushed_to_watchers);
+  test_case("a ttl too big or negative for the wire", test_out_of_range_ttl);
+  test_case("the kv cache is dropped while disconnected",
+            test_cache_dropped_while_disconnected);
+  test_case("incr counts up from an absent key", test_incr);
+  test_case("incr refuses a non-integer value", test_incr_rejects_non_integer);
+  test_case("incr is pushed to watchers", test_incr_updates_watchers);
+  test_case("setnx is won by exactly one node", test_setnx);
+  test_case("a setnx ttl releases the key", test_setnx_ttl_releases);
+  test_case("the listen socket is private to its uid",
+            test_socket_mode_is_private);
+  test_case("a uid outside the allow-list is refused",
+            test_foreign_uid_rejected);
   test_case("clear_retained stops the replay to late subscribers",
             test_clear_retained);
   test_case("daemon reaps dead clients' reader threads",

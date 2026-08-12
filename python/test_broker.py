@@ -320,6 +320,60 @@ def test_kv_delete():
     print("python kv delete self-check OK")
 
 
+def test_kv_ttl():
+    """set(ttl_ms=...) makes the daemon expire the key and push the deletion, so
+    a watcher's warm read flips to None with no round-trip of its own."""
+    with Daemon("pyttl") as d, Node("a") as a, Node("b") as b:
+        a.connect(d.sock)
+        b.connect(d.sock)
+        a.set("k", b"v", ttl_ms=500)
+        a.sync()
+        assert b.get("k") == b"v"  # cold read, inside the ttl: b now watches k
+
+        deadline = time.time() + 2
+        while b.get("k") is not None and time.time() < deadline:
+            time.sleep(0.01)
+        assert b.get("k") is None
+    print("python kv ttl self-check OK")
+
+
+def test_kv_incr():
+    """incr counts an absent key from 0 and stores the "=q" bytes a C++ node
+    reads with get<int64_t>(). A key holding anything else is a type error, not
+    something to coerce."""
+    with Daemon("pyincr") as d, Node("a") as a:
+        a.connect(d.sock)
+        assert a.incr("c") == 1
+        assert a.incr("c", 5) == 6
+        assert a.get("c") == struct.pack("=q", 6)
+
+        a.set("s", b"abc")
+        a.sync()
+        assert a.incr("s") is None
+        assert a.get("s") == b"abc"  # unchanged
+    print("python kv incr self-check OK")
+
+
+def test_kv_setnx():
+    """setnx hands the key to exactly one node, and its ttl releases it again if
+    the holder never does. An empty value is a real value: winning with one must
+    not read as losing."""
+    with Daemon("pysetnx") as d, Node("a") as a, Node("b") as b:
+        a.connect(d.sock)
+        b.connect(d.sock)
+        assert a.setnx("lock", b"a") is True
+        assert b.setnx("lock", b"b") is False
+        assert b.get("lock") == b"a"
+
+        assert a.setnx("held", b"", ttl_ms=500) is True  # zero value bytes
+        assert b.setnx("held", b"b") is False
+        deadline = time.time() + 2
+        while not b.setnx("held", b"b") and time.time() < deadline:
+            time.sleep(0.01)
+        assert b.get("held") == b"b"  # the ttl let the next node in
+    print("python kv setnx self-check OK")
+
+
 def test_retained_clear():
     """clear_retained() drops the topic's last value, so later subscribers are
     replayed nothing."""
@@ -404,6 +458,9 @@ if __name__ == "__main__":
     test_subscribe_before_connect()
     test_unsubscribe()
     test_kv_delete()
+    test_kv_ttl()
+    test_kv_incr()
+    test_kv_setnx()
     test_retained_clear()
     test_handler_pool()
     test_protocol_parity()
