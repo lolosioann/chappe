@@ -253,6 +253,54 @@ private:
       send_to(*c, MSG_KV_REPLY, f.name, pl.data(), pl.size());
       break;
     }
+    case MSG_KV_INCR: {
+      // Values are opaque bytes, so incr fixes one representation: a
+      // native-endian int64 in exactly 8 bytes (what wire_codec<int64_t> and
+      // Python struct "=q" produce). An absent key counts as 0; anything else
+      // stored under the key is a type error, not a coercion.
+      if (f.payload.size() < 12)
+        break;
+      uint32_t id;
+      int64_t delta;
+      std::memcpy(&id, f.payload.data(), 4);
+      std::memcpy(&delta, f.payload.data() + 4, 8);
+      std::lock_guard<std::mutex> lk(kv_mu_);
+      drop_if_expired(f.name, std::chrono::steady_clock::now());
+      int64_t cur = 0;
+      auto it = kv_.find(f.name);
+      if (it != kv_.end()) {
+        if (it->second.size() != sizeof(cur)) {
+          send_kv_result(*c, f.name, id, false, nullptr, 0);
+          break;
+        }
+        std::memcpy(&cur, it->second.data(), sizeof(cur));
+      }
+      // Wrap-around is fine, but signed overflow is UB — add as unsigned and
+      // reinterpret the bits.
+      uint64_t sum = static_cast<uint64_t>(cur) + static_cast<uint64_t>(delta);
+      char val[sizeof(sum)];
+      std::memcpy(val, &sum, sizeof(sum));
+      // expires_ untouched: incr does not clear a TTL (Redis semantics).
+      kv_[f.name].assign(val, val + sizeof(val));
+      push_kv_update(f.name, val, sizeof(val));
+      send_kv_result(*c, f.name, id, true, val, sizeof(val));
+      break;
+    }
+    case MSG_KV_SETNX: {
+      if (f.payload.size() < 8)
+        break;
+      uint32_t id, ttl_ms;
+      std::memcpy(&id, f.payload.data(), 4);
+      std::memcpy(&ttl_ms, f.payload.data() + 4, 4);
+      std::lock_guard<std::mutex> lk(kv_mu_);
+      drop_if_expired(f.name, std::chrono::steady_clock::now());
+      bool acquired = kv_.find(f.name) == kv_.end();
+      if (acquired) // ttl and all: a holder that dies without deleting the key
+                    // must not deadlock every other node forever
+        store(f.name, f.payload.data() + 8, f.payload.size() - 8, ttl_ms);
+      send_kv_result(*c, f.name, id, acquired, nullptr, 0);
+      break;
+    }
     case MSG_PING:
       send_to(*c, MSG_PONG, f.name, f.payload.data(), f.payload.size());
       break;
@@ -268,6 +316,16 @@ private:
     default:
       break;
     }
+  }
+
+  void send_kv_result(Client &c, const std::string &key, uint32_t id, bool ok,
+                      const char *val, size_t n) {
+    std::vector<char> pl; // [u32 id][u8 ok][value]
+    append_u32(pl, id);
+    pl.push_back(ok ? 1 : 0);
+    if (n)
+      pl.insert(pl.end(), val, val + n);
+    send_to(c, MSG_KV_RESULT, key, pl.data(), pl.size());
   }
 
   // ---- store mutations (caller holds kv_mu_) -------------------------------
