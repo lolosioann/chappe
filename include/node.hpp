@@ -581,7 +581,9 @@ private:
   // from connect(); later ones from reconnect_backoff().
   void run() {
     int fd = fd_; // established by connect()
+    int rejected_ms = 10;
     while (running_.load()) {
+      auto opened = std::chrono::steady_clock::now();
       read_until_closed(fd);
 
       { // link is down — tear down the fd and unblock any in-flight request
@@ -603,6 +605,18 @@ private:
       fail_pending();
       if (!running_.load())
         return;
+
+      // A link that dropped as soon as it opened means the daemon hung up on
+      // us — an access-control denial looks exactly like this — and connect()
+      // keeps succeeding, so nothing else in this loop would ever sleep. Back
+      // off, or the reject cycle spins a core here and floods the daemon's
+      // accept thread, which is the one admitting everyone else.
+      if (std::chrono::steady_clock::now() - opened < std::chrono::seconds(1)) {
+        backoff_sleep(rejected_ms);
+        rejected_ms = std::min(rejected_ms * 2, 1000);
+      } else {
+        rejected_ms = 10;
+      }
 
       fd = reconnect_backoff();
       if (fd < 0)
@@ -673,15 +687,20 @@ private:
 
   // Retry unix_connect with exponential backoff (10ms -> 1s cap), bailing out
   // promptly if the node is closed mid-wait. Returns the new fd, or -1 on close.
+  // Slept in short slices so close() isn't held up for the whole delay.
+  void backoff_sleep(int delay_ms) {
+    for (int slept = 0; slept < delay_ms && running_.load(); slept += 20)
+      std::this_thread::sleep_for(
+          std::chrono::milliseconds(std::min(20, delay_ms - slept)));
+  }
+
   int reconnect_backoff() {
     int delay_ms = 10;
     while (running_.load()) {
       int fd = ipc::unix_connect(path_);
       if (fd >= 0)
         return fd;
-      for (int slept = 0; slept < delay_ms && running_.load(); slept += 20)
-        std::this_thread::sleep_for(std::chrono::milliseconds(
-            std::min(20, delay_ms - slept)));
+      backoff_sleep(delay_ms);
       delay_ms = std::min(delay_ms * 2, 1000);
     }
     return -1;

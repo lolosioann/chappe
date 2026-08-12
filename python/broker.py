@@ -403,7 +403,9 @@ class Node:
     # address and resubscribe, until the node is closed.
     def _run(self):
         sock = self._sock  # from connect()
+        rejected = 0.01
         while self._running:
+            opened = time.monotonic()
             self._read_until_closed(sock)
             with self._send_lock:  # link down: tear down and unblock in-flight
                 if self._sock is not None:
@@ -422,6 +424,14 @@ class Node:
             self._fail_pending()
             if not self._running:
                 return
+            # A link that dropped as soon as it opened means the daemon hung up
+            # on us — an access-control denial looks exactly like this — and
+            # connect() keeps succeeding, so nothing else here would ever sleep.
+            if time.monotonic() - opened < 1.0:
+                self._backoff_sleep(rejected)
+                rejected = min(rejected * 2, 1.0)
+            else:
+                rejected = 0.01
             sock = self._reconnect_backoff()
             if sock is None:
                 return  # closed while backing off
@@ -460,6 +470,13 @@ class Node:
         except OSError:
             pass  # socket error -> treat as disconnect
 
+    def _backoff_sleep(self, delay):
+        """Slept in short slices so close() isn't held up for the whole delay."""
+        slept = 0.0
+        while slept < delay and self._running:
+            time.sleep(min(0.02, delay - slept))
+            slept += 0.02
+
     def _reconnect_backoff(self):
         delay = 0.01
         while self._running:
@@ -472,10 +489,7 @@ class Node:
                     s.close()
                 except OSError:
                     pass
-                slept = 0.0
-                while slept < delay and self._running:
-                    time.sleep(min(0.02, delay - slept))
-                    slept += 0.02
+                self._backoff_sleep(delay)
                 delay = min(delay * 2, 1.0)
         return None
 
