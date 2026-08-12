@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <future>
 #include <memory>
@@ -39,10 +40,17 @@ public:
       throw std::runtime_error("broker listen failed: " + path);
     running_.store(true);
     accept_thread_ = std::thread([this] { accept_loop(); });
+    sweep_thread_ = std::thread([this] { sweep_loop(); });
   }
 
   ~BrokerServer() {
     running_.store(false);
+    { // notify under the lock so the store above can't be missed between the
+      // sweep's running_ check and its wait_for
+      std::lock_guard<std::mutex> lk(sweep_mu_);
+      sweep_cv_.notify_all();
+    }
+    sweep_thread_.join(); // before the client fds go: the sweep pushes to them
     ::shutdown(listen_fd_, SHUT_RDWR); // unblock accept()
     if (accept_thread_.joinable())
       accept_thread_.join();
@@ -81,6 +89,8 @@ private:
 
   // How long a blocking write to a client may stall before we give up on it.
   static constexpr int SEND_TIMEOUT_SEC = 2;
+  // How often expired keys are swept out of the store.
+  static constexpr int SWEEP_MS = 100;
 
   void accept_loop() {
     while (running_.load()) {
@@ -201,21 +211,23 @@ private:
       // outbox thread with a bounded queue and a drop policy — do that when any
       // daemon-wide stall is too much, or once KV values stop being KB-scale.
       std::lock_guard<std::mutex> lk(kv_mu_);
-      kv_[f.name].assign(f.payload.begin(), f.payload.end());
-      auto it = watchers_.find(f.name);
-      if (it != watchers_.end())
-        for (const auto &w : it->second)
-          send_to(*w, MSG_KV_UPDATE, f.name, f.payload.data(),
-                  f.payload.size());
+      store(f.name, f.payload.data(), f.payload.size(), 0);
+      break;
+    }
+    case MSG_KV_SETEX: {
+      if (f.payload.size() < 4)
+        break;
+      uint32_t ttl_ms;
+      std::memcpy(&ttl_ms, f.payload.data(), 4);
+      std::lock_guard<std::mutex> lk(kv_mu_);
+      store(f.name, f.payload.data() + 4, f.payload.size() - 4, ttl_ms);
       break;
     }
     case MSG_KV_DEL: {
       std::lock_guard<std::mutex> lk(kv_mu_); // same ordering story as KV_SET
       kv_.erase(f.name);
-      auto it = watchers_.find(f.name);
-      if (it != watchers_.end())
-        for (const auto &w : it->second)
-          send_to(*w, MSG_KV_DEL, f.name, nullptr, 0);
+      expires_.erase(f.name); // else the deadline outlives the key it belonged to
+      push_kv_del(f.name);
       break;
     }
     case MSG_KV_GET: {
@@ -224,6 +236,9 @@ private:
       uint32_t id;
       std::memcpy(&id, f.payload.data(), 4);
       std::lock_guard<std::mutex> lk(kv_mu_);
+      // Before the watch is registered, or the requester would be sent a KV_DEL
+      // for a key it never saw.
+      drop_if_expired(f.name, std::chrono::steady_clock::now());
       watchers_[f.name].insert(c); // register-then-read is atomic under the lock
       c->keys.insert(f.name);
       auto it = kv_.find(f.name);
@@ -255,6 +270,68 @@ private:
     }
   }
 
+  // ---- store mutations (caller holds kv_mu_) -------------------------------
+
+  void push_kv_update(const std::string &key, const char *val, size_t n) {
+    auto it = watchers_.find(key);
+    if (it != watchers_.end())
+      for (const auto &w : it->second)
+        send_to(*w, MSG_KV_UPDATE, key, val, n);
+  }
+
+  void push_kv_del(const std::string &key) {
+    auto it = watchers_.find(key);
+    if (it != watchers_.end())
+      for (const auto &w : it->second)
+        send_to(*w, MSG_KV_DEL, key, nullptr, 0);
+  }
+
+  void store(const std::string &key, const char *val, size_t n,
+             uint32_t ttl_ms) {
+    kv_[key].assign(val, val + n);
+    if (ttl_ms)
+      expires_[key] = std::chrono::steady_clock::now() +
+                      std::chrono::milliseconds(ttl_ms);
+    else
+      expires_.erase(key); // a plain set clears an existing TTL (Redis semantics)
+    push_kv_update(key, val, n);
+  }
+
+  // Drop the key if its deadline has passed, telling its watchers. Returns
+  // whether it was dropped.
+  bool drop_if_expired(const std::string &key,
+                       std::chrono::steady_clock::time_point now) {
+    auto it = expires_.find(key);
+    if (it == expires_.end() || it->second > now)
+      return false;
+    expires_.erase(it);
+    kv_.erase(key);
+    push_kv_del(key);
+    return true;
+  }
+
+  // Expire keys in the background. Lazy expiry on read is not enough: a client
+  // serves get() from its local cache once it watches a key, so an expired key
+  // nothing round-trips for would never be noticed — and "key absent ⇒ node
+  // gone" is exactly what a TTL is used for. Pushes under kv_mu_ like
+  // MSG_KV_SET, so it inherits the same bounded-stall ceiling documented there.
+  void sweep_loop() {
+    std::unique_lock<std::mutex> lk(sweep_mu_);
+    while (running_.load()) {
+      sweep_cv_.wait_for(lk, std::chrono::milliseconds(SWEEP_MS));
+      if (!running_.load())
+        break;
+      auto now = std::chrono::steady_clock::now();
+      std::vector<std::string> due; // collected first: dropping erases entries
+      std::lock_guard<std::mutex> kv_lk(kv_mu_);
+      for (const auto &e : expires_)
+        if (e.second <= now)
+          due.push_back(e.first);
+      for (const auto &k : due)
+        drop_if_expired(k, now);
+    }
+  }
+
   // Human-readable daemon status: client/subscription/retained/kv counts plus
   // per-topic subscriber tallies. Read-only snapshot under the relevant locks.
   std::string build_info() {
@@ -280,11 +357,12 @@ private:
       std::lock_guard<std::mutex> lk(retained_mu_);
       nretained = retained_.size();
     }
-    size_t nkeys, nwatched;
+    size_t nkeys, nwatched, nexpiring;
     {
       std::lock_guard<std::mutex> lk(kv_mu_);
       nkeys = kv_.size();
       nwatched = watchers_.size(); // keys with at least one live watcher
+      nexpiring = expires_.size();
     }
     std::string s;
     s += "clients: " + std::to_string(nclients) + "\n";
@@ -293,7 +371,8 @@ private:
     s += "patterns: " + std::to_string(npatterns) + "\n";
     s += "retained: " + std::to_string(nretained) + "\n";
     s += "kv_keys: " + std::to_string(nkeys) + "\n";
-    s += "kv_watchers: " + std::to_string(nwatched);
+    s += "kv_watchers: " + std::to_string(nwatched) + "\n";
+    s += "kv_expiring: " + std::to_string(nexpiring);
     return s;
   }
 
@@ -401,6 +480,13 @@ private:
   std::mutex kv_mu_;
   std::unordered_map<std::string, std::vector<char>> kv_;
   std::unordered_map<std::string, std::set<ClientPtr>> watchers_;
+  // Deadline per TTL'd key; keys set without a TTL have no entry at all.
+  std::unordered_map<std::string, std::chrono::steady_clock::time_point>
+      expires_;
+
+  std::mutex sweep_mu_; // only pairs with sweep_cv_, so shutdown is prompt
+  std::condition_variable sweep_cv_;
+  std::thread sweep_thread_;
 };
 
 } // namespace ipc
