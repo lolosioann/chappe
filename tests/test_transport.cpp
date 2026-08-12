@@ -413,6 +413,96 @@ void test_oversized_frame_drops_client() {
   ASSERT_EQ(s.at(0).value, 123);
 }
 
+// The cross-device link speaks the same frames over TCP, so the framing has to
+// survive a stream that arrives in arbitrary chunks rather than a tidy unix
+// datagram-ish one. Loopback, ephemeral port, no daemon involved.
+void test_tcp_round_trip() {
+  int srv = ipc::tcp_listen("127.0.0.1", 0);
+  ASSERT_TRUE(srv >= 0);
+  sockaddr_in bound{};
+  socklen_t blen = sizeof(bound);
+  ASSERT_EQ(::getsockname(srv, reinterpret_cast<sockaddr *>(&bound), &blen), 0);
+  uint16_t port = ntohs(bound.sin_port);
+  timeval tv{5, 0}; // accept must fail the test, never hang the whole suite
+  ::setsockopt(srv, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+  std::string big(70000, 'z'); // spans several reads, so the reader must buffer
+  std::atomic<int> wfd{-1};    // asserted after the join: the counters in
+  std::thread writer([&] {     // test.hpp are plain ints, not thread-safe
+    int fd = ipc::tcp_connect("127.0.0.1", port);
+    wfd.store(fd);
+    if (fd < 0)
+      return;
+    auto f1 = ipc::build_frame(ipc::MSG_PUBLISH, "cam/front", "abc", 3);
+    auto f2 = ipc::build_frame(ipc::MSG_KV_SET, "k", big.data(), big.size());
+    ipc::write_full(fd, f1.data(), f1.size());
+    ipc::write_full(fd, f2.data(), f2.size());
+    ::close(fd);
+  });
+
+  int c = ipc::tcp_accept(srv);
+  ASSERT_TRUE(c >= 0);
+  ipc::FrameReader reader(c);
+  ipc::Frame f;
+  ASSERT_TRUE(reader.next(f));
+  ASSERT_EQ((int)f.kind, (int)ipc::MSG_PUBLISH);
+  ASSERT_EQ(f.name, std::string("cam/front"));
+  ASSERT_EQ(std::string(f.payload.begin(), f.payload.end()), std::string("abc"));
+  ASSERT_TRUE(reader.next(f));
+  ASSERT_EQ((int)f.kind, (int)ipc::MSG_KV_SET);
+  ASSERT_EQ(f.payload.size(), big.size());
+  ASSERT_TRUE(std::string(f.payload.begin(), f.payload.end()) == big);
+
+  writer.join();
+  ASSERT_TRUE(wfd.load() >= 0);
+  ::close(c);
+  ::close(srv);
+}
+
+// Nagle would hold small frames back waiting for more to coalesce, which is
+// exactly wrong for a control bus — so the option is not optional.
+void test_tcp_sets_nodelay() {
+  int srv = ipc::tcp_listen("127.0.0.1", 0);
+  ASSERT_TRUE(srv >= 0);
+  sockaddr_in bound{};
+  socklen_t blen = sizeof(bound);
+  ::getsockname(srv, reinterpret_cast<sockaddr *>(&bound), &blen);
+  timeval tv{5, 0}; // accept must fail the test, never hang the whole suite
+  ::setsockopt(srv, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+  int fd = ipc::tcp_connect("127.0.0.1", ntohs(bound.sin_port));
+  ASSERT_TRUE(fd >= 0);
+  int c = ipc::tcp_accept(srv);
+  ASSERT_TRUE(c >= 0);
+  for (int side : {fd, c}) { // the accepted socket doesn't inherit it
+    int on = 0;
+    socklen_t len = sizeof(on);
+    ASSERT_EQ(::getsockopt(side, IPPROTO_TCP, TCP_NODELAY, &on, &len), 0);
+    ASSERT_TRUE(on != 0);
+    int alive = 0;
+    len = sizeof(alive);
+    ::getsockopt(side, SOL_SOCKET, SO_KEEPALIVE, &alive, &len);
+    ASSERT_TRUE(alive != 0);
+  }
+  ::close(fd);
+  ::close(c);
+  ::close(srv);
+}
+
+// A link pointed at a port nobody is listening on must report failure, not hand
+// back a broken fd the caller would then read garbage from.
+void test_tcp_connect_refused() {
+  int srv = ipc::tcp_listen("127.0.0.1", 0);
+  ASSERT_TRUE(srv >= 0);
+  sockaddr_in bound{};
+  socklen_t blen = sizeof(bound);
+  ::getsockname(srv, reinterpret_cast<sockaddr *>(&bound), &blen);
+  uint16_t port = ntohs(bound.sin_port);
+  ::close(srv); // now nothing is listening there
+
+  ASSERT_EQ(ipc::tcp_connect("127.0.0.1", port), -1);
+}
+
 int main() {
   test_case("daemon carries pod/list/string/composite", test_transport_types);
   test_case("publish is not echoed to the publisher", test_transport_no_echo);
@@ -425,5 +515,8 @@ int main() {
             test_reconnect_resubscribe);
   test_case("oversized frame drops client, not daemon",
             test_oversized_frame_drops_client);
+  test_case("frames round-trip over tcp", test_tcp_round_trip);
+  test_case("tcp sockets get nodelay and keepalive", test_tcp_sets_nodelay);
+  test_case("tcp connect to a dead port fails", test_tcp_connect_refused);
   return test_summary();
 }

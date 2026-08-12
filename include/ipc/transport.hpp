@@ -7,6 +7,9 @@
 #include <type_traits>
 #include <vector>
 
+#include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -222,6 +225,88 @@ inline int unix_listen(const std::string &path, int backlog = 128,
 
 inline int unix_accept(int listen_fd) {
   return ::accept(listen_fd, nullptr, nullptr);
+}
+
+// ---- TCP helpers ----------------------------------------------------------
+// For the cross-device link only. The daemon and Node stay on unix sockets, so
+// the SO_PEERCRED uid gate keeps working and frames stay on the host that can
+// actually map them. TCP has no peer-credential equivalent and there is
+// deliberately no auth here: run links over a private network (WireGuard, SSH,
+// a VLAN). A token in the clear would look like security without being it.
+
+// Both knobs matter on a control bus. Nagle would sit on the small frames this
+// protocol is made of, and a peer that loses power goes silent rather than
+// closing, which the two-hour keepalive default would not notice until long
+// after anyone cared.
+inline void tcp_tune(int fd) {
+  int on = 1;
+  ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
+  ::setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof(on));
+  int idle = 10, intvl = 3, cnt = 3; // ~19 s to call a silent peer gone
+  ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+  ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+  ::setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
+}
+
+// getaddrinfo rather than inet_pton: it costs the same here and takes hostnames
+// and IPv6 without a second code path.
+inline int tcp_connect(const std::string &host, uint16_t port) {
+  addrinfo hints{};
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  addrinfo *res = nullptr;
+  if (::getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &res))
+    return -1;
+  int fd = -1;
+  for (addrinfo *a = res; a; a = a->ai_next) {
+    fd = ::socket(a->ai_family, a->ai_socktype, a->ai_protocol);
+    if (fd < 0)
+      continue;
+    if (::connect(fd, a->ai_addr, a->ai_addrlen) == 0)
+      break;
+    ::close(fd);
+    fd = -1;
+  }
+  ::freeaddrinfo(res);
+  if (fd >= 0)
+    tcp_tune(fd);
+  return fd;
+}
+
+// `host` is required, with no all-interfaces default: with no auth on the wire,
+// which address this listens on is the whole access-control story, so it has to
+// be a decision rather than something you get by leaving an argument out.
+inline int tcp_listen(const std::string &host, uint16_t port,
+                      int backlog = 128) {
+  addrinfo hints{};
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_flags = AI_PASSIVE;
+  addrinfo *res = nullptr;
+  if (::getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &res))
+    return -1;
+  int fd = -1;
+  for (addrinfo *a = res; a; a = a->ai_next) {
+    fd = ::socket(a->ai_family, a->ai_socktype, a->ai_protocol);
+    if (fd < 0)
+      continue;
+    int on = 1; // or a restart trips over its own TIME_WAIT on the same port
+    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+    if (::bind(fd, a->ai_addr, a->ai_addrlen) == 0 &&
+        ::listen(fd, backlog) == 0)
+      break;
+    ::close(fd);
+    fd = -1;
+  }
+  ::freeaddrinfo(res);
+  return fd;
+}
+
+inline int tcp_accept(int listen_fd) {
+  int fd = ::accept(listen_fd, nullptr, nullptr);
+  if (fd >= 0)
+    tcp_tune(fd); // the listening socket's options don't carry over
+  return fd;
 }
 
 // ---- framing --------------------------------------------------------------
