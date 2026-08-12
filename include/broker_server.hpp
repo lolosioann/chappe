@@ -263,9 +263,7 @@ private:
     }
     case MSG_KV_DEL: {
       std::lock_guard<std::mutex> lk(kv_mu_); // same ordering story as KV_SET
-      kv_.erase(f.name);
-      expires_.erase(f.name); // else the deadline outlives the key it belonged to
-      push_kv_del(f.name);
+      drop_key(f.name);
       break;
     }
     case MSG_KV_GET: {
@@ -393,6 +391,14 @@ private:
     push_kv_update(key, val, n);
   }
 
+  // Erasing the deadline too, or it would outlive the key it belonged to and
+  // fire a second KV_DEL at whoever rewrote that key in the meantime.
+  void drop_key(const std::string &key) {
+    kv_.erase(key);
+    expires_.erase(key);
+    push_kv_del(key);
+  }
+
   // Drop the key if its deadline has passed, telling its watchers. Returns
   // whether it was dropped.
   bool drop_if_expired(const std::string &key,
@@ -400,9 +406,7 @@ private:
     auto it = expires_.find(key);
     if (it == expires_.end() || it->second > now)
       return false;
-    expires_.erase(it);
-    kv_.erase(key);
-    push_kv_del(key);
+    drop_key(key);
     return true;
   }
 

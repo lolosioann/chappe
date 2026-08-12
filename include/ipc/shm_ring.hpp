@@ -50,8 +50,6 @@ public:
 
   size_t size() const noexcept { return valid() ? shm_ring_slot_size(ring_) : 0; }
 
-  int32_t index() const noexcept { return idx_; }
-
 private:
   void release() noexcept {
     if (valid()) {
@@ -137,8 +135,6 @@ public:
       return ShmSlotView{};
     return ShmSlotView(ring_, idx);
   }
-
-  size_t slot_size() const noexcept { return shm_ring_slot_size(ring_); }
 
 private:
   explicit SharedMemoryRing(shm_ring_t *r) : ring_(r) {}
