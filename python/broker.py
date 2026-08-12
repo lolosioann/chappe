@@ -218,9 +218,15 @@ class Node:
 
     # ---- get/set -----------------------------------------------------------
 
-    def set(self, key, value):
+    def set(self, key, value, ttl_ms=0):
+        """Store `value` (bytes) under `key`. With ttl_ms > 0 the daemon deletes
+        the key that many milliseconds later and pushes the deletion to
+        watchers; a set without a ttl clears any the key had."""
         self._require_connected()
-        self._send(_KV_SET, key.encode(), value)
+        if ttl_ms:
+            self._send(_KV_SETEX, key.encode(), _U32.pack(ttl_ms) + value)
+        else:
+            self._send(_KV_SET, key.encode(), value)
 
     def delete(self, key):
         """Erase `key` from the store; the daemon pushes the deletion to every

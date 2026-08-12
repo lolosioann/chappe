@@ -10,6 +10,7 @@
 #include <cstring>
 #include <functional>
 #include <future>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -305,11 +306,20 @@ public:
   // and also subscribes to future updates, so later sets by any node are pushed
   // in and cached — subsequent gets read locally with no round-trip.
 
-  template <typename T> void set(const std::string &key, const T &val) {
+  // A non-zero `ttl` makes the daemon delete the key that long after this set
+  // and push the deletion to watchers, so "key present" means "the writer was
+  // alive within the last ttl". A set without one clears any TTL the key had.
+  template <typename T>
+  void set(const std::string &key, const T &val,
+           std::chrono::milliseconds ttl = std::chrono::milliseconds::zero()) {
     require_connected();
+    uint32_t ms = ttl_to_wire(ttl);
     std::vector<char> bytes;
+    if (ms)
+      ipc::append_u32(bytes, ms);
     ipc::wire_codec<T>::encode(val, bytes);
-    send(ipc::MSG_KV_SET, key, bytes.data(), bytes.size());
+    send(ms ? ipc::MSG_KV_SETEX : ipc::MSG_KV_SET, key, bytes.data(),
+         bytes.size());
   }
 
   // Remove the key from the daemon's store. Every watcher (this node included)
@@ -403,6 +413,17 @@ private:
     }
     if (first)
       send(ipc::MSG_SUBSCRIBE, name, nullptr, 0);
+  }
+
+  // The wire carries a ttl as u32 milliseconds, so narrow it here instead of
+  // letting a cast do it quietly: a negative ttl would come out as ~49 days,
+  // and one of 2^32 ms as 0 — which the daemon reads as "clear the ttl", the
+  // exact opposite of what was asked for.
+  static uint32_t ttl_to_wire(std::chrono::milliseconds ttl) {
+    if (ttl.count() <= 0)
+      return 0;
+    return static_cast<uint32_t>(std::min<int64_t>(
+        ttl.count(), std::numeric_limits<uint32_t>::max()));
   }
 
   std::future<std::optional<std::vector<char>>> register_pending(uint32_t id) {
