@@ -9,8 +9,10 @@ current build is coherent and tested. Add each only when real use asks for it.
       reader thread (C++ `Node` and Python `Node`) reconnects to the same
       address with exponential backoff and re-sends every `SUBSCRIBE`; publishes
       during the gap are dropped, and get/sync don't block on a lost request.
-      The KV cache is invalidated on reconnect (next get() cold-fetches and
-      re-watches). Remaining: a bounded replay buffer so a reconnected node also
+      The KV cache is invalidated the moment the link drops, so a get() during
+      the outage reports the key absent instead of a value that may already be
+      gone; the first get() after reconnecting cold-fetches and re-watches.
+      Remaining: a bounded replay buffer so a reconnected node also
       gets messages it *missed* while gone, not just resumed live delivery (see
       the Streams item under "Borrow from Redis").
 - [x] **Startup ordering.** ~~A publish sent before its subscriber registers is

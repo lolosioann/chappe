@@ -118,9 +118,11 @@ race on state topics. Plain event/data streams stay non-retained.
 **Reconnect.** If the daemon restarts or a connection drops, a node's reader
 thread reconnects to the same address (exponential backoff) and re-sends its
 subscriptions automatically — `connected()` reports the live state. Publishes
-during the gap are dropped and the KV cache is invalidated (the next `get()`
-re-fetches); a node does not yet replay messages it *missed* while disconnected,
-only resumes live delivery. Same behavior in the C++ and Python clients.
+during the gap are dropped and the KV cache is invalidated the moment the link
+goes down, so a `get()` during the outage reports the key absent rather than a
+value that may already be gone (the first one after reconnecting re-fetches); a
+node does not yet replay messages it *missed* while disconnected, only resumes
+live delivery. Same behavior in the C++ and Python clients.
 
 **Wildcard subscriptions.** For hierarchical topics named with `/`
 (e.g. `cam/front`, `sensor/imu/accel`), `subscribe_pattern` matches a bash-path-
