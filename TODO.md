@@ -32,9 +32,13 @@ intact.
 - [x] **Redis bridge** — done: `python/redis_bridge.py`, an ordinary client that
       mirrors named kv keys out to Redis and topics both ways, for monitoring
       apps that speak Redis. No daemon changes, no dependency added to the core.
-- [ ] **TCP primitives** — `tcp_connect`/`tcp_listen` in `transport.hpp`
-      (NODELAY, REUSEADDR, keepalive), used *only* by the link below. `Node` and
-      `BrokerServer` keep calling the unix ones.
+- [x] **TCP primitives** — done: `tcp_connect`/`tcp_listen`/`tcp_accept`/
+      `tcp_tune` in `transport.hpp`, with NODELAY (Nagle would sit on frames this
+      small), REUSEADDR, and keepalive tuned to ~19 s so a peer that loses power
+      is noticed. `tcp_listen` takes a bind address with no all-interfaces
+      default — with no auth on the wire, that choice *is* the access control.
+      Used only by the link below; `Node` and `BrokerServer` still call the unix
+      ones.
 - [ ] **`broker_link`** — a C++ Node on the local bus, TCP to one peer link,
       forwarding topics and keys chosen by the existing `topic_matches`
       wildcards. Federated kv is eventually consistent with no cross-device

@@ -89,6 +89,14 @@
 - **CI** — GitHub Actions workflow running the C++ suites and both Python
   self-checks.
 
+### Transport
+- **TCP primitives** — `tcp_connect` / `tcp_listen` / `tcp_accept` / `tcp_tune`
+  in `ipc/transport.hpp`, carrying the same frames as the unix path. Nothing in
+  the daemon or `Node` calls them: they exist for the cross-device link, so the
+  daemon keeps its unix socket and its `SO_PEERCRED` uid gate. `tcp_listen`
+  requires an explicit bind address — there is no auth over TCP, so that choice
+  is the access control, and links belong on a private network.
+
 ### Wire protocol
 - Adds `MSG_KV_DEL = 11`, `MSG_KV_SETEX = 12`, `MSG_KV_INCR = 13`,
   `MSG_KV_SETNX = 14` and `MSG_KV_RESULT = 15`; nothing existing changed. Old
