@@ -35,7 +35,14 @@ current build is coherent and tested. Add each only when real use asks for it.
       Pattern handlers are untyped (topic + raw bytes). No retained replay for
       patterns, and no wildcard frame subscriptions — noted as follow-ups if
       needed. (For hierarchy, name topics with '/', e.g. `cam/front`.)
-- [ ] **Access control.** No auth on the socket — any local process can connect.
+- [x] **Access control.** Done: the listen socket is bound `0600` (umask around
+      the bind, so it never exists world-connectable), and every accepted
+      connection is checked against `SO_PEERCRED` before it is read from.
+      `BrokerServer(path, {uids...})` swaps the default same-uid rule for an
+      explicit allow-list (complete set, not additive) and opens the socket mode
+      so those uids can reach the check. Same-uid is the boundary: a process
+      running as you can ptrace you anyway. No per-topic/per-key ACLs — add if a
+      real multi-tenant case turns up.
 
 ## Borrow from Redis
 
@@ -52,16 +59,22 @@ structured/cross-host state and keep this on the hot path.
       value on subscribe. Remaining: a bounded per-topic ring of *recent*
       messages (replay-N-back, not just last), which covers the reconnect
       replay case (a reattached node gets what it missed, not only the latest).
-- [ ] **Atomic KV ops** — `incr`, `setnx`/compare-and-swap. Our `set` is a blind
-      last-writer-wins overwrite, so nodes can't do counters, locks, or barriers.
-      The daemon already serializes the KV under one lock, so these are a few
-      verbs, not a redesign. Unlocks leader election / sequencing / presence.
-      (Delete landed this pass — `del`/`delete`, `MSG_KV_DEL` — but it's another
-      blind write, not an atomic op.)
-- [ ] **Key TTL / expiry** (Redis `EXPIRE`). Turns the KV into a presence/
-      heartbeat mechanism (write a key with a 2 s TTL; its absence = node gone)
-      and bounds unbounded growth. Lazy + periodic sweep on the daemon. A key
-      can now be removed explicitly (`del`), but nothing expires on its own.
+- [x] **Atomic KV ops** — done: `incr` and `setnx` in both clients, executed
+      inside the daemon's store lock so concurrent nodes can't lose an increment
+      or both win a lock. `incr` fixes one representation (native-endian `int64`,
+      exactly 8 bytes — what `get<int64_t>` and `struct "=q"` read); anything
+      else under the key is a type error, not a coercion. `setnx` takes a TTL so
+      a holder that dies can't lock everyone out. No general compare-and-swap
+      yet — `setnx` covers the lock case, add CAS if a read-modify-write on an
+      arbitrary value turns up.
+- [x] **Key TTL / expiry** (Redis `EXPIRE`). Done: `set(key, val, ttl)` /
+      `set(key, value, ttl_ms=)`, and a plain `set` clears the TTL. A 100 ms
+      sweep thread on the daemon expires keys and pushes the deletion to
+      watchers. The sweep is not an optimisation here: clients serve `get` from
+      their cache once warm, so a lazily-expired key nothing round-trips for
+      would never be noticed. No `EXPIRE`/`TTL`/`PERSIST` on an existing key —
+      the TTL rides the write; add them if resetting one without rewriting the
+      value turns up.
 - [x] **Introspection** (Redis `INFO`). Done: `node.info()` returns a daemon
       status snapshot — connected clients, per-topic subscriber counts, pattern/
       retained/kv totals. C++ and Python. (Message/drop counters not tracked
@@ -77,8 +90,7 @@ durability/HA (see *Resilience*, but mostly out of scope per above).
       an oversized/garbage length drops that one connection instead of letting
       the reader `resize()` to gigabytes and take the daemon down with a
       `bad_alloc`.
-- [ ] **Access control** — no auth on the socket (also under *Routing*); any
-      local process can connect, subscribe to anything, and overwrite any key.
+- [x] **Access control** — done; see *Routing features* above.
 
 ## Daemon ceilings (`broker_server.hpp`, marked `ponytail:`)
 

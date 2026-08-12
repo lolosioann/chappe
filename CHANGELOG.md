@@ -18,6 +18,23 @@
 - **Delete** — `Node::del(key)` in C++, `Node.delete(key)` in Python. The daemon
   erases the key and pushes the deletion to every watcher; a watcher drops the
   cached value but keeps watching, so its next `get` reads "absent" locally.
+- **Key TTL** — `set(key, val, ttl)` / `set(key, value, ttl_ms=...)`. The daemon
+  deletes the key once it is due and pushes the deletion like a `del`, so "key
+  present" means "the writer was alive within the last TTL". A plain `set`
+  clears an existing TTL (Redis semantics). A 100 ms sweep thread does the
+  expiring — required, not an optimisation: a warm client answers `get` from its
+  cache, so a key that expired lazily would never be noticed. `info()` gained a
+  `kv_expiring` count.
+- **Atomic ops** — `incr(key, by)` and `setnx(key, val, ttl)` in both clients,
+  executed inside the daemon's store lock, so concurrent nodes can't lose an
+  increment or both win a lock the way a get/modify/set pair would. `incr` fixes
+  the counter representation at a native-endian `int64` in exactly 8 bytes —
+  readable as an ordinary value with `get<int64_t>()` / `struct.unpack("=q")` —
+  counts an absent key as 0, and reports a key holding anything else as a type
+  error rather than coercing it. `setnx` takes a TTL because that is what stops
+  a holder that dies without releasing from locking every other node out. A TTL
+  outside what the wire's u32 milliseconds can hold is clamped rather than cast:
+  truncating to 0 would have read as "no TTL" and stored the key permanently.
 
 ### Resilience & hardening
 - **Slow-consumer bound** — accepted client sockets get a 2 s `SO_SNDTIMEO` and
@@ -32,6 +49,26 @@
   are dropped when their last client leaves, instead of lingering for the
   daemon's life and being walked on every publish. `info()` gained a
   `kv_watchers` count, which makes the watcher half of that observable.
+- **Access control** — the listen socket is bound `0600` (umask around the bind,
+  so it never exists world-connectable for a window), and every accepted
+  connection is checked against `SO_PEERCRED` before it is read from; the
+  credentials come from the kernel, so a client can't forge them, and a
+  `getsockopt` failure denies. `BrokerServer(path, {uids...})` replaces the
+  default same-uid rule with an explicit allow-list — the complete set, not an
+  addition — and opens the socket mode so those uids can reach the check.
+- **KV cache dropped on disconnect, not on reconnect** — a client used to keep
+  serving cached values for the whole reconnect window, so a TTL'd key read
+  "still there" long after the daemon had expired it. The cache is cleared when
+  the link drops; a `get` in the window reports the key absent, which is the
+  safe answer for a heartbeat or a lock.
+- **Reconnect backs off after an instant hang-up** — a link that dropped as soon
+  as it opened (what an access-control denial looks like) used to spin
+  connect/EOF as fast as the kernel allowed: ~2.3 CPU-seconds per 3 s wall in
+  C++, 1.8 in Python, all of it also hitting the daemon's accept thread. Both
+  clients now back off 10 ms doubling to 1 s; measured at 0.01 s / 0.05 s.
+- **Bounded wait on `incr`/`setnx`** — the C++ calls time out after 5 s like
+  their Python counterparts, instead of blocking the caller forever against a
+  daemon that doesn't know the verb.
 - **Socket file removed on shutdown** — the daemon unlinks its listen address
   when it stops, instead of leaving it in `/tmp` (test runs accumulated one per
   daemon).
@@ -43,8 +80,14 @@
   self-checks.
 
 ### Wire protocol
-- Adds `MSG_KV_DEL = 11`; nothing existing changed. Old clients are unaffected,
-  but an old daemon can't serve a new client's `del()`.
+- Adds `MSG_KV_DEL = 11`, `MSG_KV_SETEX = 12`, `MSG_KV_INCR = 13`,
+  `MSG_KV_SETNX = 14` and `MSG_KV_RESULT = 15`; nothing existing changed. Old
+  clients are unaffected, but an old daemon can't serve a new client's `del()`,
+  TTL or atomic ops.
+- `MSG_KV_RESULT` answers `incr`/`setnx` rather than reusing `MSG_KV_REPLY`,
+  because a `KV_REPLY` makes the client cache the value and mark the key
+  watched. The daemon registers no watcher for these, so that entry would never
+  be refreshed and every later `get` would serve it.
 
 ## v1.0.0
 

@@ -55,6 +55,12 @@ Both the daemon and its clients default to the well-known address — `$BROKER_S
 if set, otherwise `/tmp/broker.sock` — so the common case never names a path.
 Ctrl-C / SIGTERM stops the daemon.
 
+The socket is created `0600`, so only the uid running the daemon can connect —
+worth knowing before you put it in a shared `/tmp`. To serve other users, pass
+`BrokerServer` an allow-list of uids (`BrokerServer(path, {1000, 1001})`); the
+socket then opens up and `SO_PEERCRED` becomes the gate instead. The list is the
+complete set, not an addition, so the daemon's own uid needs to be in it too.
+
 ## Usage
 
 Declare messages as plain types and give each a topic name:
@@ -171,16 +177,39 @@ a.set<int>("gear", 3);              // writes the authoritative value in the dae
 int g = b.get<int>("gear").value(); // first get round-trips + starts watching
 int h = b.get<int>("gear").value(); // subsequent gets read the local cache
 a.del("gear");                      // erases it; watchers drop their cached copy
+
+using namespace std::chrono_literals;
+a.set<int>("alive", 1, 2s);         // the daemon deletes it 2 s from now
+a.incr("seq", 1);                   // atomic counter -> the new total
+a.setnx<std::string>("lock", "a", 5s);  // won it? -> bool
 ```
 
 `get<T>` reads the local cache once warm. The first read of a key round-trips to
 the daemon and subscribes to future updates, so later `set`s by any node are
 pushed into the cache — subsequent reads are local with no round-trip. Unknown
-keys return `std::nullopt`.
+keys return `std::nullopt`. The cache is dropped the moment the link goes down,
+not when it comes back: nothing can tell a disconnected node that a key expired
+or was deleted, so a `get` during an outage reports the key absent rather than
+handing back a value that may be long gone.
 
 `del` erases the key in the daemon and pushes the deletion to every watcher. A
 watching node keeps watching, so its next `get` reports the key absent straight
 from the cache, with no round-trip.
+
+A `set` with a TTL makes the daemon delete the key that long afterwards and push
+the deletion out exactly like a `del`, so "key present" means "the writer was
+alive within the last TTL" — a heartbeat with no extra topic. A plain `set`
+clears any TTL the key had. Expiry is swept every 100 ms, so a key can be read
+for up to that long past its deadline; a client that never round-trips again
+still sees it go, which is why the sweep exists at all.
+
+`incr` and `setnx` run inside the daemon's store lock, so concurrent nodes can't
+lose an increment or both win a lock the way a get/modify/set pair would.
+`incr` fixes one representation — a native-endian `int64` in exactly 8 bytes, so
+`get<int64_t>` reads a counter as an ordinary value and an absent key counts as
+0; a key holding anything else is a type error (`std::nullopt`, nothing
+changed), not a coercion. Give `setnx` a TTL: it is what stops a holder that
+dies without `del`ing the key from locking every other node out forever.
 
 ### Introspection
 
@@ -196,6 +225,7 @@ patterns: 1
 retained: 0
 kv_keys: 2
 kv_watchers: 1
+kv_expiring: 0
 ```
 
 Counts are of live entries only: a topic, pattern or watched key disappears from
@@ -226,7 +256,10 @@ messages directly — a C++ `struct Tick { int seq; }` is `struct.pack("=i", seq
 - **pub/sub and get/set** are pure stdlib — no build, no dependencies.
 - **Same surface as C++** — `unsubscribe`/`unsubscribe_pattern`,
   `clear_retained(topic)`, and `delete(key)` (spelled out, since `del` is a
-  keyword; the C++ name is `del`).
+  keyword; the C++ name is `del`). The KV extras too: `set(key, value,
+  ttl_ms=...)`, `incr(key, by=1)` and `setnx(key, value, ttl_ms=...)`. `incr`
+  stores `struct.pack("=q", n)`, the same bytes a C++ node reads with
+  `get<int64_t>()`, so a counter is shared across both languages.
 - **Handler pool** — `Node("py", threads=4)` runs handlers on 4 workers instead
   of the reader thread. The default (`threads=0`) runs them inline on the
   reader, so keep them quick.
@@ -270,11 +303,18 @@ relative, not absolute. A captured snapshot lives in [BENCHMARKS.md](BENCHMARKS.
   reading is disconnected instead of stalling the store indefinitely with the KV
   lock held. That bounds the stall, it doesn't remove it: a slow-but-draining
   consumer keeps every send making progress and still delays a `set` fan-out.
+  One extra thread sweeps expired keys every 100 ms under the same lock. The
+  listen socket is `0600` and every accepted connection is checked against
+  `SO_PEERCRED` before it is read from — credentials come from the kernel, so a
+  client can't forge them, and a `getsockopt` failure denies.
 
 - **Wire protocol** (`include/ipc/transport.hpp`) — one frame shape,
   `[u8 kind][u32 name_len][name][u32 payload_len][payload]`, native-endian
   (same-host assumption). Kinds cover subscribe/publish, kv
-  set/del/get/reply/update, and a ping/pong barrier. `wire_codec<T>` handles
+  set/setex/del/get/reply/update/incr/setnx/result, and a ping/pong barrier.
+  `KV_RESULT` answers `incr`/`setnx` instead of `KV_REPLY` precisely because it
+  must *not* populate the client cache: the daemon registers no watcher for
+  those, so a cached entry would go stale unnoticed. `wire_codec<T>` handles
   trivially-copyable types as raw bytes, with specializations for `std::string`
   and `std::vector<T>`.
 
