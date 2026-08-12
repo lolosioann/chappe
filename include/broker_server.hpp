@@ -42,21 +42,23 @@ public:
     if (listen_fd_ < 0)
       throw std::runtime_error("broker listen failed: " + path);
     running_.store(true);
-    accept_thread_ = std::thread([this] { accept_loop(); });
-    sweep_thread_ = std::thread([this] { sweep_loop(); });
+    try {
+      accept_thread_ = std::thread([this] { accept_loop(); });
+      sweep_thread_ = std::thread([this] { sweep_loop(); });
+    } catch (...) {
+      // Out of threads. The destructor won't run — the object was never
+      // constructed — so the one that did start has nothing to join it, and a
+      // joinable std::thread member being destroyed calls terminate(). Undo by
+      // hand and let the caller see the exception instead.
+      stop_threads();
+      ::close(listen_fd_);
+      ::unlink(path_.c_str());
+      throw;
+    }
   }
 
   ~BrokerServer() {
-    running_.store(false);
-    { // notify under the lock so the store above can't be missed between the
-      // sweep's running_ check and its wait_for
-      std::lock_guard<std::mutex> lk(sweep_mu_);
-      sweep_cv_.notify_all();
-    }
-    sweep_thread_.join(); // before the client fds go: the sweep pushes to them
-    ::shutdown(listen_fd_, SHUT_RDWR); // unblock accept()
-    if (accept_thread_.joinable())
-      accept_thread_.join();
+    stop_threads();
     ::close(listen_fd_);
     { // unblock every client reader so its loop can exit
       std::lock_guard<std::mutex> lk(clients_mu_);
@@ -89,6 +91,23 @@ private:
     explicit Client(int f) : fd(f) {}
   };
   using ClientPtr = std::shared_ptr<Client>;
+
+  // Stop and join the accept and sweep threads. Each join is guarded because
+  // this also runs from the constructor's failure path, where one of them may
+  // never have started.
+  void stop_threads() {
+    running_.store(false);
+    { // notify under the lock so the store above can't be missed between the
+      // sweep's running_ check and its wait_for
+      std::lock_guard<std::mutex> lk(sweep_mu_);
+      sweep_cv_.notify_all();
+    }
+    if (sweep_thread_.joinable())
+      sweep_thread_.join(); // before the client fds go: the sweep pushes to them
+    ::shutdown(listen_fd_, SHUT_RDWR); // unblock accept()
+    if (accept_thread_.joinable())
+      accept_thread_.join();
+  }
 
   // How long a blocking write to a client may stall before we give up on it.
   static constexpr int SEND_TIMEOUT_SEC = 2;
