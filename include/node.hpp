@@ -322,6 +322,63 @@ public:
          bytes.size());
   }
 
+  // How long a reply to incr/setnx is waited for. Unlike get/sync/info, these
+  // verbs are new: a daemon predating them ignores the frame and never answers,
+  // so the wait has to be bounded or the caller hangs for good. Matches the
+  // Python client's `timeout=5.0`.
+  static constexpr auto REPLY_TIMEOUT = std::chrono::seconds(5);
+
+  // Counter/sequencer primitive: add `by` to the key's value in the daemon and
+  // return the new total. It happens under the daemon's lock, so concurrent
+  // nodes can't lose an increment the way a get/modify/set pair would. The
+  // value is a native-endian int64 in exactly 8 bytes — get<int64_t>() reads
+  // it — and an absent key counts as 0. nullopt means the key holds something
+  // that isn't one of those (nothing was changed), or the link is down.
+  std::optional<int64_t> incr(const std::string &key, int64_t by = 1) {
+    require_connected();
+    uint32_t id = next_req_.fetch_add(1);
+    auto fut = register_pending(id);
+    std::vector<char> pl;
+    ipc::append_u32(pl, id);
+    ipc::wire_codec<int64_t>::encode(by, pl);
+    if (!send(ipc::MSG_KV_INCR, key, pl.data(), pl.size()))
+      fulfill(id, std::nullopt); // disconnected: don't block on a dropped request
+    if (fut.wait_for(REPLY_TIMEOUT) != std::future_status::ready) {
+      fulfill(id, std::nullopt); // unregister, or pending_ grows per timeout
+      return std::nullopt;
+    }
+    auto reply = fut.get();
+    int64_t out;
+    if (!reply ||
+        !ipc::wire_codec<int64_t>::decode(reply->data(), reply->size(), out))
+      return std::nullopt;
+    return out;
+  }
+
+  // Lock / leader-election primitive: set the key only if it is unset, and
+  // return whether this node was the one that won it. Pass a `ttl` — it is what
+  // stops a holder that dies without del()ing the key from deadlocking every
+  // other node forever.
+  template <typename T>
+  bool setnx(const std::string &key, const T &val,
+             std::chrono::milliseconds ttl = std::chrono::milliseconds::zero()) {
+    require_connected();
+    uint32_t id = next_req_.fetch_add(1);
+    auto fut = register_pending(id);
+    std::vector<char> pl;
+    ipc::append_u32(pl, id);
+    ipc::append_u32(pl, ttl_to_wire(ttl));
+    ipc::wire_codec<T>::encode(val, pl);
+    if (!send(ipc::MSG_KV_SETNX, key, pl.data(), pl.size()))
+      fulfill(id, std::nullopt);
+    if (fut.wait_for(REPLY_TIMEOUT) != std::future_status::ready) {
+      fulfill(id, std::nullopt);
+      return false;
+    }
+    // has_value(), not a truth test: a win carries zero value bytes.
+    return fut.get().has_value();
+  }
+
   // Remove the key from the daemon's store. Every watcher (this node included)
   // is pushed the deletion and drops its cached value.
   void del(const std::string &key) {
@@ -564,6 +621,20 @@ private:
       case ipc::MSG_KV_UPDATE:
         handle_kv_update(f);
         break;
+      case ipc::MSG_KV_RESULT: {
+        // Unlike MSG_KV_REPLY this must not cache or mark the key watched: the
+        // daemon registered no watcher for an incr/setnx, so a cached value
+        // would never be refreshed and every later get() would read it.
+        if (f.payload.size() < 5)
+          break;
+        uint32_t id;
+        std::memcpy(&id, f.payload.data(), 4);
+        std::optional<std::vector<char>> val;
+        if (f.payload[4])
+          val.emplace(f.payload.begin() + 5, f.payload.end());
+        fulfill(id, std::move(val));
+        break;
+      }
       case ipc::MSG_KV_DEL: {
         // Stay in kv_watched_: the cache is still authoritative for this key, so
         // a later get() reads "absent" locally instead of round-tripping.

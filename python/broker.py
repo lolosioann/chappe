@@ -28,6 +28,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
  _KV_RESULT) = range(16)
 
 _U32 = struct.Struct("=I")  # native-endian u32, matching the C++ memcpy
+_I64 = struct.Struct("=q")  # the counter representation incr fixes
 
 # The FrameHandle POD the C++ side puts on the broker for a frame topic:
 # { u64 timestamp_ns; u32 width; u32 height; u32 stride; }. The "4x" is the
@@ -228,6 +229,39 @@ class Node:
         else:
             self._send(_KV_SET, key.encode(), value)
 
+    def incr(self, key, by=1, timeout=5.0):
+        """Add `by` to the counter at `key` in the daemon and return the new
+        total; an absent key counts as 0. It happens under the daemon's lock, so
+        concurrent nodes can't lose an increment the way a get/set pair would.
+        The stored value is struct.pack("=q") bytes, so C++ nodes read it with
+        get<int64_t>(). None means the key holds something else (nothing was
+        changed) or the link is down."""
+        self._require_connected()
+        rid = self._next_id()
+        fut = self._register(rid)
+        if not self._send(_KV_INCR, key.encode(), _U32.pack(rid) + _I64.pack(by)):
+            self._fulfill(rid, None)  # disconnected: don't block on a dropped req
+        reply = fut.result(timeout=timeout)
+        # Length-checked like the C++ side's wire_codec decode: a reply that
+        # isn't exactly 8 bytes is a bad answer, not an exception to raise.
+        if reply is None or len(reply) != _I64.size:
+            return None
+        return _I64.unpack(reply)[0]
+
+    def setnx(self, key, value, ttl_ms=0, timeout=5.0):
+        """Set `key` only if it is unset, returning whether this node won it —
+        the lock / leader-election primitive. Pass a ttl_ms: it is what stops a
+        holder that dies without delete()ing the key from deadlocking every
+        other node forever."""
+        self._require_connected()
+        rid = self._next_id()
+        fut = self._register(rid)
+        payload = _U32.pack(rid) + _U32.pack(ttl_ms) + value
+        if not self._send(_KV_SETNX, key.encode(), payload):
+            self._fulfill(rid, None)
+        # `is not None`, not a truth test: a win carries zero value bytes.
+        return fut.result(timeout=timeout) is not None
+
     def delete(self, key):
         """Erase `key` from the store; the daemon pushes the deletion to every
         watcher. Named delete because `del` is a keyword (C++ is Node::del)."""
@@ -403,6 +437,12 @@ class Node:
                     with self._kv_lock:
                         self._watched.add(name)
                         self._cache[name] = payload
+                elif kind == _KV_RESULT and len(payload) >= 5:
+                    # Unlike _KV_REPLY this must not cache: the daemon holds no
+                    # watcher for an incr/setnx, so the entry would go stale
+                    # unnoticed and every later get() would read it.
+                    self._fulfill(_U32.unpack(payload[:4])[0],
+                                  payload[5:] if payload[4] else None)
                 elif kind == _KV_DEL:
                     with self._kv_lock:  # stays watched, so a warm get() reads
                         self._cache.pop(name, None)  # None without a round-trip
