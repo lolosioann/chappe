@@ -72,6 +72,12 @@
   its own request/reply sequence, and only two of the five bounded the wait;
   they now share one `request()` / `_request()` helper in each client, so the
   policy is set in one place.
+- **`drain()` actually drains** — `ThreadPool::drain()` (and so `Node::drain()`)
+  queued a sentinel task and returned when it ran, which with more than one
+  worker only proved *a* worker had reached the back of the queue, not that the
+  others had finished what they were running. It now waits on the in-flight
+  count as well. Both existing callers happened to guard with their own wait
+  first, so nothing was failing because of it.
 - **Socket file removed on shutdown** — the daemon unlinks its listen address
   when it stops, instead of leaving it in `/tmp` (test runs accumulated one per
   daemon).

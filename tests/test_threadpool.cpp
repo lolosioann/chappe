@@ -63,11 +63,9 @@ void test_drain_waits_for_completion() {
     finished = true;
   });
 
-  // drain() enqueues a sentinel after the sleep task.
-  // With 2 workers the sentinel may run on the other worker
-  // before the sleep task finishes. Use a spin-wait instead.
-  // drain() is tested correctly in test_executes_all_tasks.
-  std::this_thread::sleep_for(std::chrono::milliseconds(60));
+  // The pool has a spare worker, so anything that only queued a marker behind
+  // the sleeping task would come back immediately and see finished == false.
+  pool.drain();
   ASSERT_TRUE(finished.load());
 }
 

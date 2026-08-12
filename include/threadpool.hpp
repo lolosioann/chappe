@@ -12,6 +12,8 @@ class ThreadPool {
   std::queue<std::function<void()>> tasks_;
   std::mutex mutex_;
   std::condition_variable cv_;
+  std::condition_variable idle_cv_;
+  size_t active_ = 0; // taken off the queue but not finished yet
   bool stop_ = false;
 
   void workerLoop() {
@@ -24,8 +26,14 @@ class ThreadPool {
           return;
         task = std::move(tasks_.front());
         tasks_.pop();
+        active_++;
       }
       task();
+      {
+        std::lock_guard lock(mutex_);
+        active_--;
+      }
+      idle_cv_.notify_all();
     }
   }
 
@@ -53,20 +61,13 @@ public:
     cv_.notify_one();
   }
 
-  // wait until all currently queued tasks have been executed
+  // Wait until every task queued so far has finished. The in-flight count is
+  // what makes this true with more than one worker: a sentinel task at the back
+  // of the queue only proves *a* worker got that far, not that the others had
+  // finished what they were already running.
   void drain() {
-    std::mutex m;
-    std::condition_variable cv;
-    bool done = false;
-
-    enqueue([&] {
-      std::lock_guard lk(m);
-      done = true;
-      cv.notify_one();
-    });
-
-    std::unique_lock lk(m);
-    cv.wait(lk, [&] { return done; });
+    std::unique_lock lock(mutex_);
+    idle_cv_.wait(lock, [this] { return tasks_.empty() && active_ == 0; });
   }
 
   ThreadPool(const ThreadPool &) = delete;
