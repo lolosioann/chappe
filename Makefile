@@ -12,7 +12,7 @@ BINDIR   := bin
 PREFIX ?= /usr/local
 DESTDIR ?=
 PUB_HEADERS := include/broker.hpp include/node.hpp include/broker_server.hpp \
-               include/threadpool.hpp include/shm_ring.h
+               include/threadpool.hpp include/link.hpp include/shm_ring.h
 
 # Client (Node) headers. node.hpp pulls in the shm ring (frame API) and the
 # wire layer, so anything using Node depends on these and links shm_ring.o.
@@ -21,28 +21,39 @@ CLIENT_DEPS := include/node.hpp include/broker.hpp include/threadpool.hpp \
                include/ipc/transport.hpp include/shm_ring.h
 # Daemon (BrokerServer) headers — no shm, sockets only.
 SERVER_DEPS := include/broker_server.hpp include/ipc/transport.hpp include/broker.hpp
+# Cross-device link — transport only, no client and no shm.
+LINK_DEPS   := include/link.hpp include/ipc/transport.hpp
 
 # ---- targets ---------------------------------------------------------------
 
 ALL_TESTS := $(BINDIR)/test_threadpool $(BINDIR)/test_node \
-             $(BINDIR)/test_frame_ipc $(BINDIR)/test_transport
+             $(BINDIR)/test_frame_ipc $(BINDIR)/test_transport \
+             $(BINDIR)/test_link
 # Self-contained demos (embedded daemon) — built and run by `make examples`.
 SELF_EXAMPLES := $(BINDIR)/basic $(BINDIR)/keyvalue $(BINDIR)/frames
 # Cross-process demo — built only; run by hand against a broker_daemon.
 IPC_EXAMPLES  := $(BINDIR)/producer $(BINDIR)/consumer
 ALL_EXAMPLES  := $(SELF_EXAMPLES) $(IPC_EXAMPLES)
 
-.PHONY: all test examples daemon libshm_ring install uninstall clean \
-        test_threadpool test_node test_frame_ipc test_transport \
+.PHONY: all test examples daemon link libshm_ring install uninstall clean \
+        test_threadpool test_node test_frame_ipc test_transport test_link \
         test_shm_ring stress_shm_ring bench_shm_ring
 
-all: test examples daemon libshm_ring
+all: test examples daemon link libshm_ring
 
 # ---- broker daemon ---------------------------------------------------------
 
 daemon: $(BINDIR)/broker_daemon
 
 $(BINDIR)/broker_daemon: src/broker_daemon.cpp $(SERVER_DEPS)
+	@mkdir -p $(BINDIR)
+	$(CXX) $(CXXFLAGS) $< -o $@
+
+# ---- cross-device link -----------------------------------------------------
+
+link: $(BINDIR)/broker_link
+
+$(BINDIR)/broker_link: src/broker_link.cpp $(LINK_DEPS)
 	@mkdir -p $(BINDIR)
 	$(CXX) $(CXXFLAGS) $< -o $@
 
@@ -64,6 +75,10 @@ $(BINDIR)/test_transport: tests/test_transport.cpp $(CLIENT_DEPS) $(SERVER_DEPS)
 	@mkdir -p $(BINDIR)
 	$(CXX) $(CXXFLAGS) $< $(BINDIR)/shm_ring.o -o $@ -lrt
 
+$(BINDIR)/test_link: tests/test_link.cpp $(CLIENT_DEPS) $(SERVER_DEPS) $(LINK_DEPS) include/test.hpp $(BINDIR)/shm_ring.o
+	@mkdir -p $(BINDIR)
+	$(CXX) $(CXXFLAGS) $< $(BINDIR)/shm_ring.o -o $@ -lrt
+
 # ---- run individual test suites --------------------------------------------
 
 test_threadpool: $(BINDIR)/test_threadpool
@@ -78,6 +93,9 @@ test_frame_ipc: $(BINDIR)/test_frame_ipc
 test_transport: $(BINDIR)/test_transport
 	@echo "\n========== test_transport =========="; ./$(BINDIR)/test_transport
 
+test_link: $(BINDIR)/test_link
+	@echo "\n========== test_link =========="; ./$(BINDIR)/test_link
+
 # ---- run all tests ---------------------------------------------------------
 
 test: $(ALL_TESTS)
@@ -89,8 +107,10 @@ test: $(ALL_TESTS)
 	./$(BINDIR)/test_frame_ipc;    status3=$$?; \
 	echo "\n========== test_transport =========="; \
 	./$(BINDIR)/test_transport;    status4=$$?; \
+	echo "\n========== test_link =========="; \
+	./$(BINDIR)/test_link;         status5=$$?; \
 	echo "\n========== summary =========="; \
-	if [ $$status1 -eq 0 ] && [ $$status2 -eq 0 ] && [ $$status3 -eq 0 ] && [ $$status4 -eq 0 ]; then \
+	if [ $$status1 -eq 0 ] && [ $$status2 -eq 0 ] && [ $$status3 -eq 0 ] && [ $$status4 -eq 0 ] && [ $$status5 -eq 0 ]; then \
 		echo "all suites passed"; exit 0; \
 	else \
 		echo "one or more suites failed"; exit 1; \
@@ -159,11 +179,12 @@ examples: $(ALL_EXAMPLES) $(BINDIR)/broker_daemon
 
 # ---- install ---------------------------------------------------------------
 
-install: $(BINDIR)/broker_daemon $(BINDIR)/libshm_ring.so
+install: $(BINDIR)/broker_daemon $(BINDIR)/broker_link $(BINDIR)/libshm_ring.so
 	install -d $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/lib \
 	           $(DESTDIR)$(PREFIX)/include/broker/ipc \
 	           $(DESTDIR)$(PREFIX)/lib/broker/python
 	install -m 755 $(BINDIR)/broker_daemon  $(DESTDIR)$(PREFIX)/bin/
+	install -m 755 $(BINDIR)/broker_link    $(DESTDIR)$(PREFIX)/bin/
 	install -m 644 $(BINDIR)/libshm_ring.so $(DESTDIR)$(PREFIX)/lib/
 	install -m 644 $(PUB_HEADERS)           $(DESTDIR)$(PREFIX)/include/broker/
 	install -m 644 include/ipc/*.hpp        $(DESTDIR)$(PREFIX)/include/broker/ipc/
@@ -176,6 +197,7 @@ install: $(BINDIR)/broker_daemon $(BINDIR)/libshm_ring.so
 
 uninstall:
 	rm -f  $(DESTDIR)$(PREFIX)/bin/broker_daemon
+	rm -f  $(DESTDIR)$(PREFIX)/bin/broker_link
 	rm -f  $(DESTDIR)$(PREFIX)/lib/libshm_ring.so
 	rm -rf $(DESTDIR)$(PREFIX)/include/broker
 	rm -rf $(DESTDIR)$(PREFIX)/lib/broker

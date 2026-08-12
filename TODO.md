@@ -12,9 +12,8 @@ current build is coherent and tested. Add each only when real use asks for it.
       The KV cache is invalidated the moment the link drops, so a get() during
       the outage reports the key absent instead of a value that may already be
       gone; the first get() after reconnecting cold-fetches and re-watches.
-      Remaining: a bounded replay buffer so a reconnected node also
-      gets messages it *missed* while gone, not just resumed live delivery (see
-      the Streams item under "Borrow from Redis").
+      A reconnected node resumes live delivery and does not replay what it
+      missed — deliberately, see *Retained delivery* under "Borrow from Redis".
 - [x] **Startup ordering.** ~~A publish sent before its subscriber registers is
       dropped.~~ Done: opt-in retained messages — `publish(msg, retain=true)`
       stores a last-value the daemon replays on subscribe (MQTT-style). State
@@ -39,21 +38,29 @@ intact.
       default — with no auth on the wire, that choice *is* the access control.
       Used only by the link below; `Node` and `BrokerServer` still call the unix
       ones.
-- [ ] **`broker_link`** — a C++ Node on the local bus, TCP to one peer link,
-      forwarding topics and keys chosen by the existing `topic_matches`
-      wildcards. Federated kv is eventually consistent with no cross-device
-      ordering, so keep one owning device per key; the link suppresses its own
-      echo the way the Redis bridge does. Refuses frame topics.
-- [ ] **Security for the link.** No `SO_PEERCRED` equivalent over TCP, and no
-      auth is planned: run links over WireGuard/SSH/a private VLAN. Say so in
-      the docs rather than shipping a token that looks like security.
+- [x] **`broker_link`** — done: `include/link.hpp` + `src/broker_link.cpp`, one
+      process per peer, forwarding topics (wildcards) and keys (exact names)
+      both ways. It speaks frames straight to the local daemon rather than going
+      through `Node`, which is what lets it act on KV_UPDATE/KV_DEL as they
+      arrive instead of polling a cache. Publishes need no loop guard —
+      route_publish is noLocal — but kv does, since the daemon pushes an update
+      back to whoever wrote it. Federated kv is eventually consistent with no
+      cross-device ordering, so keep one owning device per key.
+- [x] **Security for the link.** Settled: no auth over TCP, deliberately. There
+      is no `SO_PEERCRED` equivalent and a plaintext token would look like
+      security without being it, so `tcp_listen` requires an explicit bind
+      address and the docs say to run links over WireGuard/SSH/a private VLAN.
 - [ ] **Payload portability.** Bigger than the endianness note it replaces:
       `wire_codec<T>` ships raw struct bytes, so layout, padding *and* byte order
       are all assumed identical across the link. Fine between identical builds;
       document it, and serialize explicitly for anything else.
 - [ ] **Frames across devices** — a separate feature, not a link setting.
       Forwarding pixels over TCP defeats the zero-copy design, so decide what it
-      should actually be before building it.
+      should actually be before building it. Until then, note the sharp edge: a
+      forwarded FrameHandle points the far side at a segment that is missing, or
+      at a *different* local ring of the same name. The link cannot detect a
+      frame topic — on the wire a handle is just bytes — so this is a
+      configuration hazard the docs warn about rather than something it blocks.
 
 ## Routing features
 

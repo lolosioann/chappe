@@ -96,6 +96,15 @@
   self-checks.
 
 ### Transport
+- **Cross-device links** — `broker_link` joins two devices' buses over TCP,
+  forwarding chosen topics (wildcards) and keys (exact names) both ways, and
+  seeding a key that already had a value when the link comes up. Every device
+  keeps its own daemon on its own unix socket, so local traffic never crosses
+  the network, frames stay where they can be mapped, a partition leaves each
+  device working, and the daemon keeps its `SO_PEERCRED` uid gate. The link is a
+  protocol relay rather than a client: it speaks frames straight to the local
+  daemon, which is how it acts on kv pushes as they arrive instead of polling.
+  No auth on the wire by design — put links on a private network.
 - **TCP primitives** — `tcp_connect` / `tcp_listen` / `tcp_accept` / `tcp_tune`
   in `ipc/transport.hpp`, carrying the same frames as the unix path. Nothing in
   the daemon or `Node` calls them: they exist for the cross-device link, so the

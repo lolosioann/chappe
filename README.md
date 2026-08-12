@@ -318,6 +318,47 @@ run it under a supervisor. The bus side reconnects on its own, as any node does.
 Self-check: `python3 python/test_bridge.py` (skips cleanly without `redis-py` or
 a `redis-server` on PATH).
 
+## Cross-device links
+
+Every device runs its own daemon on its own unix socket, and `broker_link` joins
+two of them over TCP. One side listens, the other connects; they are otherwise
+symmetric:
+
+```sh
+# device A
+./bin/broker_link --listen 0.0.0.0:7000 --topic 'cmd/*' --key state/mode
+# device B
+./bin/broker_link --peer a.local:7000   --topic 'cmd/*' --key state/mode
+```
+
+A publish on either device reaches subscribers on the other; a `set` or `del` on
+a forwarded key crosses too, and a key that already had a value is seeded across
+when the link comes up. Nothing else crosses — a link carries exactly what both
+its ends were told to carry, and a frame arriving from a peer configured
+differently is dropped rather than trusted.
+
+Why a daemon per device instead of one daemon with remote clients: local traffic
+never touches the network, frames stay where they can be mapped, and a partition
+leaves each device's own bus working. The daemon itself never learns TCP, so it
+keeps its unix socket and its `SO_PEERCRED` uid gate.
+
+- **No auth on the wire.** There is no `SO_PEERCRED` equivalent for TCP and no
+  token scheme here, because a plaintext token looks like security without being
+  it. Put links on a private network — WireGuard, an SSH tunnel, a VLAN — and
+  bind `--listen` to the interface you mean.
+- **Keys are exact names, topics may be wildcards.** Same reason as the Redis
+  bridge: a client starts watching a key by getting it, so there is nothing to
+  match a key pattern against.
+- **Federated kv is eventually consistent.** There is no cross-device ordering,
+  so if two devices write the same key they will disagree about which write was
+  last. Keep one owning device per key.
+- **Don't forward a frame topic.** A `FrameHandle` names shared memory on the
+  host that published it. Forwarding one points the far side at a segment that
+  is missing — or worse, at a *different* ring that happens to share the topic
+  name. The link cannot detect this for you: on the wire a handle is just bytes.
+- **A dropped link exits** with a non-zero status rather than reconnecting, so a
+  supervisor restarts it. Same posture as the Redis bridge.
+
 ## Benchmarks
 
 ```sh
