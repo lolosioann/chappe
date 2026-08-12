@@ -77,6 +77,10 @@ template <typename T> struct wire_codec<std::vector<T>> {
 //   KV_REPLY               name=key           payload=[u32 req_id][u8 found][value]
 //   KV_UPDATE              name=key           payload=value bytes (push to watchers)
 //   KV_DEL                 name=key           payload=—  (both directions)
+//   KV_SETEX               name=key           payload=[u32 ttl_ms][value]
+//   KV_INCR                name=key           payload=[u32 req_id][i64 delta]
+//   KV_SETNX               name=key           payload=[u32 req_id][u32 ttl_ms][value]
+//   KV_RESULT              name=key           payload=[u32 req_id][u8 ok][value]
 //   PING/PONG              name=—             payload=[u32 req_id]  (round-trip barrier)
 enum : uint8_t {
   MSG_SUBSCRIBE = 0,
@@ -100,6 +104,17 @@ enum : uint8_t {
   // Client->daemon: erase the key, then push the same frame to its watchers.
   // Daemon->client: the key is gone; drop the cached value but keep watching.
   MSG_KV_DEL = 11,
+  // Like KV_SET, but the daemon deletes the key again once ttl_ms has passed
+  // (ttl_ms of 0 is meaningless here — a plain KV_SET is that).
+  MSG_KV_SETEX = 12,
+  MSG_KV_INCR = 13,
+  MSG_KV_SETNX = 14,
+  // Reply to INCR/SETNX, and deliberately not KV_REPLY: KV_REPLY makes the
+  // client cache the value and mark the key watched, but the daemon registers
+  // no watcher for these — a poisoned cache entry would make every later get()
+  // serve a stale local value forever. KV_RESULT only fulfills the request.
+  // ok=1 means the operation happened (for INCR the new i64 follows).
+  MSG_KV_RESULT = 15,
 };
 
 // Upper bound on a single frame's name or payload length. A peer sending a
