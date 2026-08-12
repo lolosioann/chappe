@@ -54,13 +54,14 @@ Sentinel/Cluster, the data-type zoo, ACL modules, search/JSON/timeseries) we
 deliberately **don't** rebuild: at that point, run Redis alongside for durable/
 structured/cross-host state and keep this on the hot path.
 
-- [~] **Streams-style retained / replayable delivery** (highest value). Redis
-      Streams keep an append-only log with replay-from-ID and consumer-group
-      acks; classic pub/sub (ours) is fire-and-forget. **Partly done:** opt-in
+- [x] **Retained delivery.** Done, and deliberately stopping here: opt-in
       last-value retention (`publish(msg, retain=true)`) replays the current
-      value on subscribe. Remaining: a bounded per-topic ring of *recent*
-      messages (replay-N-back, not just last), which covers the reconnect
-      replay case (a reattached node gets what it missed, not only the latest).
+      value on subscribe. **Replay-N-back is explicitly out of scope** — this bus
+      is last-value everywhere by design (KV holds the current value, retained
+      pub/sub the current message, the frame ring the current frame), and a
+      reconnecting node wants current state, not a backlog of stale ones. If you
+      ever need the missed history, that is a log, and Redis Streams or a file is
+      the right thing to run alongside.
 - [x] **Atomic KV ops** — done: `incr` and `setnx` in both clients, executed
       inside the daemon's store lock so concurrent nodes can't lose an increment
       or both win a lock. `incr` fixes one representation (native-endian `int64`,
@@ -106,8 +107,16 @@ durability/HA (see *Resilience*, but mostly out of scope per above).
       client sockets plus drop-on-write-failure keeps one wedged consumer from
       stalling the daemon forever, but a slow-but-draining one still holds the KV
       lock for the length of its writes. The upgrade path is a per-client outbox
-      thread with a bounded queue and an explicit drop policy — then no consumer
-      can delay a `set` fan-out at all.
+      thread with a bounded queue and an explicit drop policy.
+      **Measured, so the reason is not what it looks like:** the lock is *not*
+      what caps `set` throughput. Sending outside `kv_mu_` leaves the writer-count
+      curve just as flat (167k→211k sets/s from 1 to 16 writers), and building
+      the frame once per fan-out instead of once per watcher buys 4%. The cost is
+      one wakeup and 5–11 µs of CPU per watcher per set — the daemon never gets
+      past 5.3 of 8 cores, so it is wakeup-bound, not lock- or CPU-bound. An
+      outbox therefore pays off by letting *one* wakeup carry many updates, and
+      the bigger win on top of it is conflating repeat updates to the same key.
+      See `make bench_broker` (kv contention section) for the curve.
 - [ ] KV: single global lock held across pushes. Add per-key versioning if it
       ever stalls under contention.
 
