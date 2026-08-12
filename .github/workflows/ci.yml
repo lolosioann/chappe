@@ -21,3 +21,14 @@ jobs:
 
       - name: Python frame self-check
         run: python3 python/test_frames.py
+
+      # The bridge check skips itself without these, and a step that always
+      # skips covers nothing — so install them rather than let it no-op.
+      - name: Install Redis for the bridge check
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq redis-server
+          python3 -m pip install --quiet redis
+
+      - name: Redis bridge self-check
+        run: python3 python/test_bridge.py
