@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -193,7 +194,15 @@ inline int unix_connect(const std::string &path) {
   return fd;
 }
 
-inline int unix_listen(const std::string &path, int backlog = 128) {
+// `mode` is applied by umasking around the bind itself, because bind is what
+// creates the socket file: chmod()ing it afterwards would leave a window in
+// which anyone on the box could connect.
+//
+// ponytail: umask is process-global, so this races any other thread creating a
+// file during the call. Fine as-is — the daemon binds once at startup. Use a
+// private directory around the socket instead if that ever stops holding.
+inline int unix_listen(const std::string &path, int backlog = 128,
+                       mode_t mode = 0600) {
   ::unlink(path.c_str());
   int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
   if (fd < 0)
@@ -201,8 +210,10 @@ inline int unix_listen(const std::string &path, int backlog = 128) {
   sockaddr_un addr{};
   addr.sun_family = AF_UNIX;
   std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
-  if (::bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0 ||
-      ::listen(fd, backlog) != 0) {
+  mode_t old_umask = ::umask(~mode & 0777);
+  int bound = ::bind(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr));
+  ::umask(old_umask);
+  if (bound != 0 || ::listen(fd, backlog) != 0) {
     ::close(fd);
     return -1;
   }

@@ -33,9 +33,12 @@ namespace ipc {
 // count or fan-out throughput actually demands it.
 class BrokerServer {
 public:
-  explicit BrokerServer(const std::string &path = default_broker_addr())
-      : path_(path) {
-    listen_fd_ = unix_listen(path);
+  explicit BrokerServer(const std::string &path = default_broker_addr(),
+                        std::set<uid_t> allowed_uids = {})
+      : path_(path), allowed_uids_(std::move(allowed_uids)) {
+    // An allow-list only works if the listed uids can reach the peercred check
+    // at all, so the kernel gate has to open up when there is one.
+    listen_fd_ = unix_listen(path, 128, allowed_uids_.empty() ? 0600 : 0666);
     if (listen_fd_ < 0)
       throw std::runtime_error("broker listen failed: " + path);
     running_.store(true);
@@ -92,12 +95,28 @@ private:
   // How often expired keys are swept out of the store.
   static constexpr int SWEEP_MS = 100;
 
+  // The credentials come from the kernel, not the peer, so a client cannot
+  // forge them. Same-uid is the boundary being defended and there is no point
+  // going finer: another process running as you can ptrace you anyway.
+  bool peer_allowed(int fd) {
+    ucred cr;
+    socklen_t len = sizeof(cr);
+    if (::getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cr, &len) != 0)
+      return false; // no credentials to judge, so no entry
+    return allowed_uids_.empty() ? cr.uid == ::geteuid()
+                                 : allowed_uids_.count(cr.uid) != 0;
+  }
+
   void accept_loop() {
     while (running_.load()) {
       int cfd = unix_accept(listen_fd_);
       if (cfd < 0) {
         if (!running_.load())
           break;
+        continue;
+      }
+      if (!peer_allowed(cfd)) { // before the fd is used for anything at all
+        ::close(cfd);
         continue;
       }
       timeval tv{SEND_TIMEOUT_SEC, 0}; // bound how long a wedged peer can stall
@@ -519,6 +538,10 @@ private:
 
   std::string path_; // listen address, unlinked on shutdown
   int listen_fd_;
+  // Empty means "whoever runs the daemon, and nobody else". A non-empty set is
+  // the complete list rather than an addition to it, so excluding yourself is
+  // possible — and, if you wrote it, deliberate.
+  std::set<uid_t> allowed_uids_;
   std::atomic<bool> running_{false};
   std::thread accept_thread_;
 
