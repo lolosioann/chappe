@@ -177,13 +177,7 @@ public:
   // immediately (nothing to flush) if called during a reconnect window.
   void sync() {
     require_connected();
-    uint32_t id = next_req_.fetch_add(1);
-    auto fut = register_pending(id);
-    char b[4];
-    std::memcpy(b, &id, 4);
-    if (!send(ipc::MSG_PING, "", b, 4))
-      fulfill(id, std::nullopt); // disconnected: don't block on a dropped ping
-    fut.get();
+    request(ipc::MSG_PING, "");
   }
 
   // Query the daemon for a human-readable status snapshot (connected clients,
@@ -191,16 +185,8 @@ public:
   // connected.
   std::string info() {
     require_connected();
-    uint32_t id = next_req_.fetch_add(1);
-    auto fut = register_pending(id);
-    char b[4];
-    std::memcpy(b, &id, 4);
-    if (!send(ipc::MSG_INFO, "", b, 4))
-      fulfill(id, std::nullopt);
-    auto reply = fut.get();
-    if (!reply)
-      return "";
-    return std::string(reply->begin(), reply->end());
+    auto reply = request(ipc::MSG_INFO, "");
+    return reply ? std::string(reply->begin(), reply->end()) : "";
   }
 
   // ---- frame (shm) API ------------------------------------------------------
@@ -336,18 +322,9 @@ public:
   // that isn't one of those (nothing was changed), or the link is down.
   std::optional<int64_t> incr(const std::string &key, int64_t by = 1) {
     require_connected();
-    uint32_t id = next_req_.fetch_add(1);
-    auto fut = register_pending(id);
     std::vector<char> pl;
-    ipc::append_u32(pl, id);
     ipc::wire_codec<int64_t>::encode(by, pl);
-    if (!send(ipc::MSG_KV_INCR, key, pl.data(), pl.size()))
-      fulfill(id, std::nullopt); // disconnected: don't block on a dropped request
-    if (fut.wait_for(REPLY_TIMEOUT) != std::future_status::ready) {
-      fulfill(id, std::nullopt); // unregister, or pending_ grows per timeout
-      return std::nullopt;
-    }
-    auto reply = fut.get();
+    auto reply = request(ipc::MSG_KV_INCR, key, pl.data(), pl.size());
     int64_t out;
     if (!reply ||
         !ipc::wire_codec<int64_t>::decode(reply->data(), reply->size(), out))
@@ -363,20 +340,11 @@ public:
   bool setnx(const std::string &key, const T &val,
              std::chrono::milliseconds ttl = std::chrono::milliseconds::zero()) {
     require_connected();
-    uint32_t id = next_req_.fetch_add(1);
-    auto fut = register_pending(id);
     std::vector<char> pl;
-    ipc::append_u32(pl, id);
     ipc::append_u32(pl, ttl_to_wire(ttl));
     ipc::wire_codec<T>::encode(val, pl);
-    if (!send(ipc::MSG_KV_SETNX, key, pl.data(), pl.size()))
-      fulfill(id, std::nullopt);
-    if (fut.wait_for(REPLY_TIMEOUT) != std::future_status::ready) {
-      fulfill(id, std::nullopt);
-      return false;
-    }
     // has_value(), not a truth test: a win carries zero value bytes.
-    return fut.get().has_value();
+    return request(ipc::MSG_KV_SETNX, key, pl.data(), pl.size()).has_value();
   }
 
   // Remove the key from the daemon's store. Every watcher (this node included)
@@ -394,14 +362,7 @@ public:
         return decode_cached<T>(key);
     }
     // cold path: request the value + start watching, then block for the reply.
-    uint32_t id = next_req_.fetch_add(1);
-    auto fut = register_pending(id);
-    std::vector<char> pl;
-    ipc::append_u32(pl, id);
-    if (!send(ipc::MSG_KV_GET, key, pl.data(), pl.size()))
-      fulfill(id, std::nullopt); // disconnected: don't block on a dropped request
-
-    auto reply = fut.get(); // caching happens on the reader thread, in order
+    auto reply = request(ipc::MSG_KV_GET, key);
     if (!reply)
       return std::nullopt;
     T out{};
@@ -481,6 +442,28 @@ private:
       return 0;
     return static_cast<uint32_t>(std::min<int64_t>(
         ttl.count(), std::numeric_limits<uint32_t>::max()));
+  }
+
+  // Every daemon round-trip has the same shape: take a request id, park a
+  // promise under it, send [u32 id][extra], and wait bounded. nullopt means the
+  // link was down or the daemon never answered — including because it predates
+  // the verb, which is why the wait has to be bounded rather than a plain get().
+  std::optional<std::vector<char>> request(uint8_t kind, const std::string &name,
+                                           const char *extra = nullptr,
+                                           size_t n = 0) {
+    uint32_t id = next_req_.fetch_add(1);
+    auto fut = register_pending(id);
+    std::vector<char> pl;
+    ipc::append_u32(pl, id);
+    if (n)
+      pl.insert(pl.end(), extra, extra + n);
+    if (!send(kind, name, pl.data(), pl.size()))
+      fulfill(id, std::nullopt); // disconnected: don't block on a dropped request
+    if (fut.wait_for(REPLY_TIMEOUT) != std::future_status::ready) {
+      fulfill(id, std::nullopt); // unregister, or pending_ grows per timeout
+      return std::nullopt;
+    }
+    return fut.get(); // any caching already happened on the reader thread
   }
 
   std::future<std::optional<std::vector<char>>> register_pending(uint32_t id) {

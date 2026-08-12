@@ -66,9 +66,12 @@
   connect/EOF as fast as the kernel allowed: ~2.3 CPU-seconds per 3 s wall in
   C++, 1.8 in Python, all of it also hitting the daemon's accept thread. Both
   clients now back off 10 ms doubling to 1 s; measured at 0.01 s / 0.05 s.
-- **Bounded wait on `incr`/`setnx`** — the C++ calls time out after 5 s like
-  their Python counterparts, instead of blocking the caller forever against a
-  daemon that doesn't know the verb.
+- **Bounded wait on every round-trip** — `get`, `sync`, `info`, `incr` and
+  `setnx` all time out after 5 s instead of blocking the caller forever against
+  a daemon that stops answering (or never knew the verb). Each used to hand-roll
+  its own request/reply sequence, and only two of the five bounded the wait;
+  they now share one `request()` / `_request()` helper in each client, so the
+  policy is set in one place.
 - **Socket file removed on shutdown** — the daemon unlinks its listen address
   when it stops, instead of leaving it in `/tmp` (test runs accumulated one per
   daemon).

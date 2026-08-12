@@ -196,25 +196,27 @@ class Node:
             return
         self._send(_UNSUBSCRIBE, pattern.encode(), b"")
 
+    def _request(self, kind, name, extra=b"", timeout=5.0):
+        """Every daemon round-trip has the same shape: take a request id, park a
+        future under it, send [u32 id][extra], and wait. None means the link was
+        down or the daemon never answered."""
+        rid = self._next_id()
+        fut = self._register(rid)
+        if not self._send(kind, name, _U32.pack(rid) + extra):
+            self._fulfill(rid, None)  # disconnected: don't block on a dropped req
+        return fut.result(timeout=timeout)
+
     def sync(self, timeout=5.0):
         """Round-trip barrier: returns once the daemon has processed every frame
         sent so far (e.g. call after subscribe() before a peer publishes)."""
         self._require_connected()
-        rid = self._next_id()
-        fut = self._register(rid)
-        if not self._send(_PING, b"", _U32.pack(rid)):
-            self._fulfill(rid, None)  # disconnected: nothing to flush
-        fut.result(timeout=timeout)
+        self._request(_PING, b"", timeout=timeout)
 
     def info(self, timeout=5.0):
         """Human-readable daemon status (clients, subscription counts, retained/
         kv totals). Empty string if not connected."""
         self._require_connected()
-        rid = self._next_id()
-        fut = self._register(rid)
-        if not self._send(_INFO, b"", _U32.pack(rid)):
-            self._fulfill(rid, None)
-        reply = fut.result(timeout=timeout)
+        reply = self._request(_INFO, b"", timeout=timeout)
         return reply.decode() if reply else ""
 
     # ---- get/set -----------------------------------------------------------
@@ -237,11 +239,7 @@ class Node:
         get<int64_t>(). None means the key holds something else (nothing was
         changed) or the link is down."""
         self._require_connected()
-        rid = self._next_id()
-        fut = self._register(rid)
-        if not self._send(_KV_INCR, key.encode(), _U32.pack(rid) + _I64.pack(by)):
-            self._fulfill(rid, None)  # disconnected: don't block on a dropped req
-        reply = fut.result(timeout=timeout)
+        reply = self._request(_KV_INCR, key.encode(), _I64.pack(by), timeout)
         # Length-checked like the C++ side's wire_codec decode: a reply that
         # isn't exactly 8 bytes is a bad answer, not an exception to raise.
         if reply is None or len(reply) != _I64.size:
@@ -254,13 +252,9 @@ class Node:
         holder that dies without delete()ing the key from deadlocking every
         other node forever."""
         self._require_connected()
-        rid = self._next_id()
-        fut = self._register(rid)
-        payload = _U32.pack(rid) + _U32.pack(ttl_ms) + value
-        if not self._send(_KV_SETNX, key.encode(), payload):
-            self._fulfill(rid, None)
+        extra = _U32.pack(ttl_ms) + value
         # `is not None`, not a truth test: a win carries zero value bytes.
-        return fut.result(timeout=timeout) is not None
+        return self._request(_KV_SETNX, key.encode(), extra, timeout) is not None
 
     def delete(self, key):
         """Erase `key` from the store; the daemon pushes the deletion to every
@@ -276,11 +270,7 @@ class Node:
         with self._kv_lock:
             if key in self._watched:
                 return self._cache.get(key)
-        rid = self._next_id()
-        fut = self._register(rid)
-        if not self._send(_KV_GET, key.encode(), _U32.pack(rid)):
-            self._fulfill(rid, None)  # disconnected: don't block on a dropped req
-        return fut.result(timeout=timeout)
+        return self._request(_KV_GET, key.encode(), timeout=timeout)
 
     # ---- frames (shared memory) -------------------------------------------
     # The pixels live in a shm ring keyed by the topic; only the FrameHandle
