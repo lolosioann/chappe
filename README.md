@@ -58,15 +58,28 @@ If you installed to a non-standard prefix, point the tools at it with
 
 ### Using it from Python
 
+Not on PyPI — install from a checkout, from the repo, or from a release:
+
 ```sh
-pip install chappe            # client + the shm ring, compiled for your interpreter
-pip install 'chappe[redis]'   # also pulls redis-py, for the bridge below
+pip install .                                              # from a clone
+pip install "git+ssh://git@github.com/lolosioann/chappe.git@v3.0.0"
+gh release download v3.0.0 --pattern '*.tar.gz' \
+  && pip install chappe-3.0.0.tar.gz                       # from a release
+pip install '.[redis]'                                     # extra for the Redis bridge
 ```
 
-The wheel builds `src/shm_ring.c` into the package, so frames work off a `pip
-install` alone — no `make` step and no `$CHAPPE_LIB`. Releases attach an sdist
-and a wheel; the sdist is the portable one, since a wheel is tied to the exact
-interpreter and glibc that built it.
+The repo is private, so a plain `https://` download of a release asset 404s —
+use `gh release download` (or an authenticated URL), and `git+ssh` rather than
+`git+https` unless you have a token.
+
+Installing builds `src/shm_ring.c` into the package, so frames work off pip
+alone — no `make` step and no `$CHAPPE_LIB`. **Prefer the sdist:** releases also
+attach a wheel, but it is tied to the exact interpreter that built it (CI's
+`cp312`) and pip will refuse it on any other, whereas the sdist compiles for
+whatever Python you install it into.
+
+This gets you the **client only**. The daemon and the link are C++ binaries —
+build them with `make daemon link`, or `make install` for the whole prefix.
 
 `make install` also drops the package under `$PREFIX/lib/chappe/python` for
 anyone who would rather set `PYTHONPATH` than use pip — that copy has no

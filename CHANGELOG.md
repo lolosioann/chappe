@@ -222,7 +222,7 @@ towers each reading its neighbour and passing the message on — which is what a
   be refreshed and every later `get` would serve it.
 
 ### Packaging & distribution
-- **`pip install chappe`** — `pyproject.toml` makes the Python client a real
+- **Installable with pip** — `pyproject.toml` makes the Python client a real
   package. The wheel compiles `src/shm_ring.c` into it (as `chappe._shm_ring`,
   loaded by `ctypes`, never imported — it has no `PyInit`), so frames work off a
   pip install alone, with no `make` step and no `$CHAPPE_LIB`. `chappe[redis]`
