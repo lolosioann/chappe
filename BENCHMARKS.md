@@ -77,6 +77,18 @@ Python barely moved — it's interpreter-bound, not syscall-bound — but the da
 serving it is cheaper. Frame throughput is unchanged (pixels never crossed the
 socket). Numbers above are post-change.
 
+**Concurrent kv writers: wakeup-bound, not lock-bound (2026-08-12).** The
+obvious reading of the daemon's single `kv_mu_` is that it caps `set` throughput
+under concurrent writers. Measured, it does not. Sending outside the lock leaves
+the writer-count curve just as flat — 167 k → 211 k sets/s going from 1 to 16
+writers — and building the frame once per fan-out instead of once per watcher
+buys 4%. What it actually costs is one wakeup and 5–11 µs of CPU per watcher per
+set, and the daemon never gets past 5.3 of 8 cores: it is waiting, not
+contending. So the lever is not a finer lock. It is letting one wakeup carry
+many updates (a per-client outbox), and above that, conflating repeat updates to
+the same key. Neither is built — see the `ponytail:` note at `server.hpp:248`.
+Reproduce with `make bench_chappe` (kv contention section).
+
 ---
 
 ## Frames

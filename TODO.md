@@ -130,28 +130,24 @@ durability/HA (see *Resilience*, but mostly out of scope per above).
 
 ## Daemon ceilings (`server.hpp`, marked `ponytail:`)
 
-- [ ] Thread-per-client + global locks. Fine for tens of nodes; move to epoll +
-      sharded locks only if client count / fan-out throughput demands it.
+Known limits, not planned work — throughput is deliberately off this list. Each
+is marked `ponytail:` at the line where it bites, which is the version that
+stays true; this is just the index.
+
+- **Thread-per-client + global locks.** Fine for tens of nodes. Epoll + sharded
+  locks is the upgrade path if client count ever demands it.
+- **Slow consumers are bounded, not solved.** A 2 s `SO_SNDTIMEO` plus
+  drop-on-write-failure stops one wedged consumer from stalling the daemon, but
+  a slow-but-draining one still delays a `set` fan-out. The upgrade path is a
+  per-client outbox with a bounded queue and an explicit drop policy — and the
+  measurement saying *why* (wakeup-bound, not lock-bound) is in `BENCHMARKS.md`.
+- **KV holds one global lock across pushes.** Per-key versioning if it ever
+  stalls under contention.
+
 - [x] **Reader-thread reaping.** Done: readers are `std::future<void>`s and the
       accept loop drops the finished ones before starting a new one, so a
       flapping client no longer leaks a thread per reconnect. Shutdown clears the
       vector (a future's destructor is the join).
-- [ ] Slow-consumer handling is a *bound*, not a design: a 2 s `SO_SNDTIMEO` on
-      client sockets plus drop-on-write-failure keeps one wedged consumer from
-      stalling the daemon forever, but a slow-but-draining one still holds the KV
-      lock for the length of its writes. The upgrade path is a per-client outbox
-      thread with a bounded queue and an explicit drop policy.
-      **Measured, so the reason is not what it looks like:** the lock is *not*
-      what caps `set` throughput. Sending outside `kv_mu_` leaves the writer-count
-      curve just as flat (167k→211k sets/s from 1 to 16 writers), and building
-      the frame once per fan-out instead of once per watcher buys 4%. The cost is
-      one wakeup and 5–11 µs of CPU per watcher per set — the daemon never gets
-      past 5.3 of 8 cores, so it is wakeup-bound, not lock- or CPU-bound. An
-      outbox therefore pays off by letting *one* wakeup carry many updates, and
-      the bigger win on top of it is conflating repeat updates to the same key.
-      See `make bench_chappe` (kv contention section) for the curve.
-- [ ] KV: single global lock held across pushes. Add per-key versioning if it
-      ever stalls under contention.
 
 ## Frames
 
@@ -169,12 +165,14 @@ durability/HA (see *Resilience*, but mostly out of scope per above).
       is tagged for the exact interpreter and glibc that built it, so the sdist
       is the portable artifact. Publishing to PyPI would need a manylinux build
       (`cibuildwheel`); add that if anyone outside the fleet wants it.
-- [ ] `asyncio` client variant (current one is threaded/blocking).
+
+An `asyncio` client variant is not planned; the threaded/blocking one is what
+this needs.
 
 ## Housekeeping
 
 - [x] LICENSE (MIT) + CHANGELOG for v1.0.0. Tag `v1.0.0` on the release commit.
-- [ ] Tag `v2.0.0` on the rename/packaging commit. The `release` workflow fires
-      on `v*`, checks the tag against the version in the tree, and attaches the
-      sdist and wheel. Rename the GitHub repo to `chappe` too — the old URL keeps
-      redirecting, but `git remote set-url` is worth doing on each clone.
+- [x] **v2.0.0 released.** Tagged on the rename/packaging commit; the `release`
+      workflow checked the tag against the version in the tree and attached the
+      sdist and wheel. Repo renamed to `chappe` — the old URL still redirects,
+      but `git remote set-url` is worth doing on each existing clone.
