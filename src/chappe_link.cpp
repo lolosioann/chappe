@@ -1,9 +1,9 @@
-// src/broker_link.cpp — joins this device's bus to one peer device's bus.
+// src/chappe_link.cpp — joins this device's bus to one peer device's bus.
 //
 // One side listens, the other connects; they are otherwise symmetric. Run one
 // per peer:
-//   device A:  broker_link --listen 0.0.0.0:7000 --topic 'cmd/*' --key state/mode
-//   device B:  broker_link --peer  a.local:7000  --topic 'cmd/*' --key state/mode
+//   device A:  chappe_link --listen 0.0.0.0:7000 --topic 'cmd/*' --key state/mode
+//   device B:  chappe_link --peer  a.local:7000  --topic 'cmd/*' --key state/mode
 //
 // No auth on the wire — put links on a private network. See include/link.hpp.
 #include "link.hpp"
@@ -16,7 +16,7 @@
 static void usage(const char *me) {
   std::cerr
       << "usage: " << me << " (--listen ADDR:PORT | --peer HOST:PORT) [options]\n"
-      << "  --socket PATH     local broker socket (default $BROKER_SOCKET)\n"
+      << "  --socket PATH     local broker socket (default $CHAPPE_SOCKET)\n"
       << "  --topic PATTERN   topic forwarded both ways, wildcards ok "
          "(repeatable)\n"
       << "  --key NAME        kv key forwarded both ways, exact name "
@@ -38,7 +38,7 @@ static bool split_addr(const std::string &s, std::string &host, uint16_t &port) 
 }
 
 int main(int argc, char **argv) {
-  ipc::BrokerLink::Config cfg;
+  chappe::Link::Config cfg;
   std::string listen_addr, peer_addr;
   for (int i = 1; i < argc; i++) {
     std::string a = argv[i];
@@ -76,7 +76,7 @@ int main(int argc, char **argv) {
   }
 
   // Block the signals here so the link's threads inherit the mask and sigwait
-  // below owns the shutdown, exactly as broker_daemon does.
+  // below owns the shutdown, exactly as chappe_daemon does.
   sigset_t set;
   sigemptyset(&set);
   sigaddset(&set, SIGINT);
@@ -85,16 +85,16 @@ int main(int argc, char **argv) {
 
   int peer_fd = -1;
   if (!listen_addr.empty()) {
-    int srv = ipc::tcp_listen(host, port);
+    int srv = chappe::tcp_listen(host, port);
     if (srv < 0) {
       std::cerr << "cannot listen on " << addr << "\n";
       return 1;
     }
     std::cout << "waiting for a peer link on " << addr << "\n";
-    peer_fd = ipc::tcp_accept(srv);
+    peer_fd = chappe::tcp_accept(srv);
     ::close(srv); // one peer per process; supervision handles more
   } else {
-    peer_fd = ipc::tcp_connect(host, port);
+    peer_fd = chappe::tcp_connect(host, port);
   }
   if (peer_fd < 0) {
     std::cerr << "no peer link at " << addr << "\n";
@@ -102,7 +102,7 @@ int main(int argc, char **argv) {
   }
 
   try {
-    ipc::BrokerLink link(cfg, peer_fd);
+    chappe::Link link(cfg, peer_fd);
     std::cout << "linked: " << cfg.topics.size() << " topic pattern(s), "
               << cfg.keys.size() << " key(s) (SIGINT to stop)\n";
     // Wake periodically so a peer that hangs up ends the process too, rather

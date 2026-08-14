@@ -1,8 +1,8 @@
 // tests/test_frame_ipc.cpp
 // Frames: the small FrameHandle is routed through the daemon; the pixel bytes
 // move producer->consumer directly through the shm ring.
-#include "broker.hpp"
-#include "broker_server.hpp"
+#include "chappe.hpp"
+#include "server.hpp"
 #include "ipc/frame_handle.hpp"
 #include "node.hpp"
 #include "test.hpp"
@@ -14,11 +14,13 @@
 #include <thread>
 #include <unistd.h>
 
+using namespace chappe;
+
 // ---- Frame topics ----------------------------------------------------------
 
-struct FrontCam : ipc::FrameHandle {};
-struct RearCam : ipc::FrameHandle {};
-struct SideCam : ipc::FrameHandle {};
+struct FrontCam : chappe::FrameHandle {};
+struct RearCam : chappe::FrameHandle {};
+struct SideCam : chappe::FrameHandle {};
 
 MAKE_TOPIC(FrontCam, "cam.front");
 MAKE_TOPIC(RearCam, "cam.rear");
@@ -27,7 +29,7 @@ MAKE_TOPIC(SideCam, "cam.side");
 static void clean(const char *shm) { shm_unlink(shm); }
 
 static std::string sock_path(const char *tag) {
-  return std::string("/tmp/broker_frame_") + tag + "_" +
+  return std::string("/tmp/chappe_frame_") + tag + "_" +
          std::to_string(::getpid()) + ".sock";
 }
 
@@ -43,9 +45,9 @@ template <typename P> static bool wait_until(P pred) {
 // ---- Tests -----------------------------------------------------------------
 
 void test_frame_sync() {
-  clean("/broker_cam.front");
+  clean("/chappe_cam.front");
   auto p = sock_path("front");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
   Node producer("prod");
   Node consumer("cons");
   producer.connect(p);
@@ -57,7 +59,7 @@ void test_frame_sync() {
   FrontCam got{};
   unsigned char pix[16] = {0};
   consumer.subscribe_frame<FrontCam>(
-      [&](const FrontCam &fh, ipc::ShmSlotView &v) {
+      [&](const FrontCam &fh, chappe::ShmSlotView &v) {
         got = fh;
         std::memcpy(pix, v.data(), v.size());
         called.store(true); // release: publishes got/pix to the reader below
@@ -79,9 +81,9 @@ void test_frame_sync() {
 }
 
 void test_frame_async() {
-  clean("/broker_cam.rear");
+  clean("/chappe_cam.rear");
   auto p = sock_path("rear");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
   Node producer("prod");
   Node consumer("cons", 2); // 2 worker threads
   producer.connect(p);
@@ -93,7 +95,7 @@ void test_frame_async() {
   std::atomic<uint64_t> got_ts{0};
   std::atomic<int> first_byte{-1};
   consumer.subscribe_frame<RearCam>(
-      [&](const RearCam &fh, ipc::ShmSlotView &v) {
+      [&](const RearCam &fh, chappe::ShmSlotView &v) {
         got_ts.store(fh.timestamp_ns);
         first_byte.store((int)static_cast<unsigned char *>(v.data())[0]);
         called.store(true);
@@ -110,9 +112,9 @@ void test_frame_async() {
 }
 
 void test_frame_drop_no_ring() {
-  clean("/broker_cam.side");
+  clean("/chappe_cam.side");
   auto p = sock_path("side");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
   Node producer("prod");
   Node consumer("cons"); // subscribes but never attaches
   producer.connect(p);
@@ -120,7 +122,7 @@ void test_frame_drop_no_ring() {
   producer.create_frame_ring<SideCam>(8, 4);
 
   consumer.subscribe_frame<SideCam>(
-      [](const SideCam &, ipc::ShmSlotView &) { /* never reached */ });
+      [](const SideCam &, chappe::ShmSlotView &) { /* never reached */ });
   consumer.sync();
 
   producer.publish_frame<SideCam>(
@@ -130,16 +132,16 @@ void test_frame_drop_no_ring() {
   ASSERT_EQ(consumer.frame_drops(), (uint64_t)1);
 }
 
-struct AbandonCam : ipc::FrameHandle {};
+struct AbandonCam : chappe::FrameHandle {};
 MAKE_TOPIC(AbandonCam, "cam/abandon");
 
 // A writer that throws mid-fill must return its slot to the free pool, not leak
 // it as WRITING. With a 2-slot ring, a leak would starve after two throws; with
 // the abandon path, any number of throwing publishes leave the ring usable.
 void test_frame_writer_throws_no_leak() {
-  clean("/broker_cam_abandon");
+  clean("/chappe_cam_abandon");
   auto p = sock_path("abandon");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
   Node producer("prod");
   producer.connect(p);
   producer.create_frame_ring<AbandonCam>(16, 2); // only 2 slots

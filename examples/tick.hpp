@@ -1,5 +1,5 @@
 #pragma once
-#include "broker.hpp"
+#include "chappe.hpp"
 
 // Shared message contract. Both the producer and consumer processes include
 // this so they agree on the topic name and wire layout — the only thing two

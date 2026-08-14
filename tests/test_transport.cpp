@@ -1,6 +1,6 @@
 // tests/test_transport.cpp — broker daemon routing + kv store over the wire.
-#include "broker.hpp"
-#include "broker_server.hpp"
+#include "chappe.hpp"
+#include "server.hpp"
 #include "node.hpp"
 #include "test.hpp"
 #include <atomic>
@@ -14,6 +14,8 @@
 #include <thread>
 #include <unistd.h>
 #include <vector>
+
+using namespace chappe;
 
 // ---- Messages --------------------------------------------------------------
 
@@ -42,7 +44,7 @@ MAKE_TOPIC(Pose, "pose");
 
 // ---- User codecs for the composite types -----------------------------------
 
-namespace ipc {
+namespace chappe {
 template <> struct wire_codec<Samples> {
   static void encode(const Samples &s, std::vector<char> &out) {
     wire_codec<std::vector<int32_t>>::encode(s.v, out);
@@ -65,7 +67,7 @@ template <> struct wire_codec<Pose> {
     return true;
   }
 };
-} // namespace ipc
+} // namespace chappe
 
 // ---- test-side inbox -------------------------------------------------------
 
@@ -96,7 +98,7 @@ template <class T> struct Sink {
 };
 
 static std::string sock_path(const char *tag) {
-  return std::string("/tmp/broker_tp_") + tag + "_" +
+  return std::string("/tmp/chappe_tp_") + tag + "_" +
          std::to_string(::getpid()) + ".sock";
 }
 
@@ -106,7 +108,7 @@ static std::string sock_path(const char *tag) {
 // only on the clients.
 void test_transport_types() {
   auto p = sock_path("types");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
   Node a("a");
   Node b("b");
   a.connect(p);
@@ -149,7 +151,7 @@ void test_transport_types() {
 // publishes; other subscribers do.
 void test_transport_no_echo() {
   auto p = sock_path("echo");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
   Node a("a");
   Node b("b");
   a.connect(p);
@@ -174,7 +176,7 @@ void test_transport_no_echo() {
 // the reader's cache so warm gets are local; unknown key is nullopt.
 void test_kv_store() {
   auto p = sock_path("kv");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
   Node w("writer");
   Node r("reader");
   w.connect(p);
@@ -227,7 +229,7 @@ void test_kv_requires_connection() {
 // patterns, and kv keys.
 void test_info() {
   auto p = sock_path("info");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
   Node a("a");
   Node b("b");
   a.connect(p);
@@ -248,7 +250,7 @@ void test_info() {
 // for the publish-before-subscribe race. A non-retained publish is not.
 void test_retained_delivery() {
   auto p = sock_path("retain");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
   Node pub("pub");
   pub.connect(p);
 
@@ -284,7 +286,7 @@ void test_retained_delivery() {
 // Wildcard pattern subscriptions: '+' matches one level, '*' the rest.
 void test_pattern_subscribe() {
   auto p = sock_path("pattern");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
   Node pub("pub");
   Node sub("sub");
   pub.connect(p);
@@ -306,10 +308,10 @@ void test_pattern_subscribe() {
   // Publish arbitrary topic strings (typed publish is exact-topic only) by
   // sending raw PUBLISH frames.
   auto raw_publish = [&](const std::string &topic) {
-    int fd = ipc::unix_connect(p);
+    int fd = chappe::unix_connect(p);
     ASSERT_TRUE(fd >= 0);
-    auto frame = ipc::build_frame(ipc::MSG_PUBLISH, topic, "x", 1);
-    ipc::write_full(fd, frame.data(), frame.size());
+    auto frame = chappe::build_frame(chappe::MSG_PUBLISH, topic, "x", 1);
+    chappe::write_full(fd, frame.data(), frame.size());
     ::close(fd);
   };
   raw_publish("cam/front");        // matches cam/* and cam/+
@@ -339,7 +341,7 @@ void test_pattern_subscribe() {
 // the same address, the node reconnects and resubscribes, and delivery resumes.
 void test_reconnect_resubscribe() {
   auto p = sock_path("reconnect");
-  auto server = std::make_unique<ipc::BrokerServer>(p);
+  auto server = std::make_unique<chappe::Server>(p);
 
   Node sub("sub");
   Node pub("pub");
@@ -362,7 +364,7 @@ void test_reconnect_resubscribe() {
   ASSERT_TRUE(!sub.connected()); // observed the disconnect
 
   // Bring the daemon back on the same address.
-  server = std::make_unique<ipc::BrokerServer>(p);
+  server = std::make_unique<chappe::Server>(p);
 
   // Once both have reconnected (and sub has resubscribed), a fresh publish must
   // reach the handler. Retry to absorb the async reconnect/resubscribe ordering.
@@ -384,7 +386,7 @@ void test_reconnect_resubscribe() {
 // connection, not crash the daemon — other clients keep working.
 void test_oversized_frame_drops_client() {
   auto p = sock_path("oversized");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
   Node good("good");
   good.connect(p);
   Sink<Cmd> s;
@@ -392,15 +394,15 @@ void test_oversized_frame_drops_client() {
   good.sync();
 
   // Hand-craft a frame with a bogus 1 GB payload length and send it raw.
-  int fd = ipc::unix_connect(p);
+  int fd = chappe::unix_connect(p);
   ASSERT_TRUE(fd >= 0);
   std::vector<char> frame;
-  frame.push_back((char)ipc::MSG_PUBLISH);
-  ipc::append_u32(frame, 3);                 // name_len
+  frame.push_back((char)chappe::MSG_PUBLISH);
+  chappe::append_u32(frame, 3);                 // name_len
   const char *nm = "cmd";
   frame.insert(frame.end(), nm, nm + 3);
-  ipc::append_u32(frame, 1u << 30);          // payload_len = 1 GB (bogus)
-  ipc::write_full(fd, frame.data(), frame.size());
+  chappe::append_u32(frame, 1u << 30);          // payload_len = 1 GB (bogus)
+  chappe::write_full(fd, frame.data(), frame.size());
   ::close(fd); // daemon should drop this client, not allocate 1 GB and die
 
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -417,7 +419,7 @@ void test_oversized_frame_drops_client() {
 // survive a stream that arrives in arbitrary chunks rather than a tidy unix
 // datagram-ish one. Loopback, ephemeral port, no daemon involved.
 void test_tcp_round_trip() {
-  int srv = ipc::tcp_listen("127.0.0.1", 0);
+  int srv = chappe::tcp_listen("127.0.0.1", 0);
   ASSERT_TRUE(srv >= 0);
   sockaddr_in bound{};
   socklen_t blen = sizeof(bound);
@@ -429,27 +431,27 @@ void test_tcp_round_trip() {
   std::string big(70000, 'z'); // spans several reads, so the reader must buffer
   std::atomic<int> wfd{-1};    // asserted after the join: the counters in
   std::thread writer([&] {     // test.hpp are plain ints, not thread-safe
-    int fd = ipc::tcp_connect("127.0.0.1", port);
+    int fd = chappe::tcp_connect("127.0.0.1", port);
     wfd.store(fd);
     if (fd < 0)
       return;
-    auto f1 = ipc::build_frame(ipc::MSG_PUBLISH, "cam/front", "abc", 3);
-    auto f2 = ipc::build_frame(ipc::MSG_KV_SET, "k", big.data(), big.size());
-    ipc::write_full(fd, f1.data(), f1.size());
-    ipc::write_full(fd, f2.data(), f2.size());
+    auto f1 = chappe::build_frame(chappe::MSG_PUBLISH, "cam/front", "abc", 3);
+    auto f2 = chappe::build_frame(chappe::MSG_KV_SET, "k", big.data(), big.size());
+    chappe::write_full(fd, f1.data(), f1.size());
+    chappe::write_full(fd, f2.data(), f2.size());
     ::close(fd);
   });
 
-  int c = ipc::tcp_accept(srv);
+  int c = chappe::tcp_accept(srv);
   ASSERT_TRUE(c >= 0);
-  ipc::FrameReader reader(c);
-  ipc::Frame f;
+  chappe::FrameReader reader(c);
+  chappe::Frame f;
   ASSERT_TRUE(reader.next(f));
-  ASSERT_EQ((int)f.kind, (int)ipc::MSG_PUBLISH);
+  ASSERT_EQ((int)f.kind, (int)chappe::MSG_PUBLISH);
   ASSERT_EQ(f.name, std::string("cam/front"));
   ASSERT_EQ(std::string(f.payload.begin(), f.payload.end()), std::string("abc"));
   ASSERT_TRUE(reader.next(f));
-  ASSERT_EQ((int)f.kind, (int)ipc::MSG_KV_SET);
+  ASSERT_EQ((int)f.kind, (int)chappe::MSG_KV_SET);
   ASSERT_EQ(f.payload.size(), big.size());
   ASSERT_TRUE(std::string(f.payload.begin(), f.payload.end()) == big);
 
@@ -462,7 +464,7 @@ void test_tcp_round_trip() {
 // Nagle would hold small frames back waiting for more to coalesce, which is
 // exactly wrong for a control bus — so the option is not optional.
 void test_tcp_sets_nodelay() {
-  int srv = ipc::tcp_listen("127.0.0.1", 0);
+  int srv = chappe::tcp_listen("127.0.0.1", 0);
   ASSERT_TRUE(srv >= 0);
   sockaddr_in bound{};
   socklen_t blen = sizeof(bound);
@@ -470,9 +472,9 @@ void test_tcp_sets_nodelay() {
   timeval tv{5, 0}; // accept must fail the test, never hang the whole suite
   ::setsockopt(srv, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-  int fd = ipc::tcp_connect("127.0.0.1", ntohs(bound.sin_port));
+  int fd = chappe::tcp_connect("127.0.0.1", ntohs(bound.sin_port));
   ASSERT_TRUE(fd >= 0);
-  int c = ipc::tcp_accept(srv);
+  int c = chappe::tcp_accept(srv);
   ASSERT_TRUE(c >= 0);
   for (int side : {fd, c}) { // the accepted socket doesn't inherit it
     int on = 0;
@@ -492,7 +494,7 @@ void test_tcp_sets_nodelay() {
 // A link pointed at a port nobody is listening on must report failure, not hand
 // back a broken fd the caller would then read garbage from.
 void test_tcp_connect_refused() {
-  int srv = ipc::tcp_listen("127.0.0.1", 0);
+  int srv = chappe::tcp_listen("127.0.0.1", 0);
   ASSERT_TRUE(srv >= 0);
   sockaddr_in bound{};
   socklen_t blen = sizeof(bound);
@@ -500,7 +502,7 @@ void test_tcp_connect_refused() {
   uint16_t port = ntohs(bound.sin_port);
   ::close(srv); // now nothing is listening there
 
-  ASSERT_EQ(ipc::tcp_connect("127.0.0.1", port), -1);
+  ASSERT_EQ(chappe::tcp_connect("127.0.0.1", port), -1);
 }
 
 int main() {

@@ -9,7 +9,7 @@
 #include <utility>
 #include <vector>
 
-namespace ipc {
+namespace chappe {
 
 // Joins this device's bus to one peer device's bus over TCP.
 //
@@ -26,10 +26,10 @@ namespace ipc {
 //
 // There is no auth on the wire. Run links over a private network (WireGuard,
 // SSH, a VLAN); the address tcp_listen binds is the whole access-control story.
-class BrokerLink {
+class Link {
 public:
   struct Config {
-    std::string socket = default_broker_addr();
+    std::string socket = default_addr();
     std::vector<std::string> topics; // wildcard patterns, forwarded both ways
     std::vector<std::string> keys;   // exact key names, forwarded both ways
   };
@@ -37,7 +37,7 @@ public:
   // `peer_fd` is an already-connected socket to the peer link — whoever built
   // it decided listen-vs-connect, which keeps that policy out of here and lets
   // a test hand over a socketpair.
-  BrokerLink(Config cfg, int peer_fd)
+  Link(Config cfg, int peer_fd)
       : cfg_(std::move(cfg)), peer_fd_(peer_fd) {
     local_fd_ = unix_connect(cfg_.socket);
     if (local_fd_ < 0)
@@ -56,21 +56,21 @@ public:
     try {
       local_thread_ = std::thread([this] { local_loop(); });
       peer_thread_ = std::thread([this] { peer_loop(); });
-    } catch (...) { // same story as BrokerServer: no destructor runs from here
+    } catch (...) { // same story as Server: no destructor runs from here
       stop();
       ::close(local_fd_);
       throw;
     }
   }
 
-  ~BrokerLink() {
+  ~Link() {
     stop();
     ::close(local_fd_);
     ::close(peer_fd_);
   }
 
-  BrokerLink(const BrokerLink &) = delete;
-  BrokerLink &operator=(const BrokerLink &) = delete;
+  Link(const Link &) = delete;
+  Link &operator=(const Link &) = delete;
 
   // False once either side hangs up. Losing a link is not recovered from here —
   // the process exits and a supervisor restarts it, like the Redis bridge.
@@ -217,4 +217,4 @@ private:
   std::map<std::string, int> echo_del_;
 };
 
-} // namespace ipc
+} // namespace chappe

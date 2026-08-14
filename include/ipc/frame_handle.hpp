@@ -3,14 +3,14 @@
 #include <cstdint>
 #include <type_traits>
 
-namespace ipc {
+namespace chappe {
 
 // Metadata for one published frame. The pixel/sensor bytes live in the shm ring
 // slot; this small POD rides through the broker as the message. Each frame
 // topic is its own broker message type — derive a tag from FrameHandle and give
 // it a topic name:
 //
-//     struct FrontCam : ipc::FrameHandle {};
+//     struct FrontCam : chappe::FrameHandle {};
 //     MAKE_TOPIC(FrontCam, "cam.front");
 //
 // The topic name identifies the backing ring (one ring per topic); slot_index
@@ -27,4 +27,4 @@ struct FrameHandle {
 static_assert(std::is_trivially_copyable_v<FrameHandle>,
               "FrameHandle must stay POD for zero-copy socket transport");
 
-} // namespace ipc
+} // namespace chappe

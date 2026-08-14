@@ -3,7 +3,7 @@
 // and a vision node processes them zero-copy. Only the small FrameHandle rides
 // the broker; the pixels never do. It works identically across processes — the
 // two nodes live in one process here just to keep the example runnable.
-#include "broker_server.hpp"
+#include "server.hpp"
 #include "node.hpp"
 #include <atomic>
 #include <chrono>
@@ -13,15 +13,15 @@
 #include <sys/mman.h>
 #include <thread>
 
-struct Camera : ipc::FrameHandle {};
+struct Camera : chappe::FrameHandle {};
 MAKE_TOPIC(Camera, "cam/front");
 
 int main() {
-  shm_unlink("/broker_cam_front"); // clear any stale segment from a prior run
-  ipc::BrokerServer broker;
+  shm_unlink("/chappe_cam_front"); // clear any stale segment from a prior run
+  chappe::Server broker;
 
-  Node camera("camera");
-  Node vision("vision");
+  chappe::Node camera("camera");
+  chappe::Node vision("vision");
   camera.connect();
   vision.connect();
 
@@ -32,7 +32,7 @@ int main() {
   vision.attach_frame_ring<Camera>();
 
   std::atomic<int> processed{0};
-  vision.subscribe_frame<Camera>([&](const Camera &meta, ipc::ShmSlotView &slot) {
+  vision.subscribe_frame<Camera>([&](const Camera &meta, chappe::ShmSlotView &slot) {
     const uint8_t *px = static_cast<const uint8_t *>(slot.data());
     uint64_t sum = 0; // trivial "processing": average brightness, read in place
     for (size_t i = 0; i < slot.size(); i++)

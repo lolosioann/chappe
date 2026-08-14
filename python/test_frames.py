@@ -9,25 +9,25 @@ import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from broker import Node
+from chappe import Node
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DAEMON = os.path.join(ROOT, "bin", "broker_daemon")
+DAEMON = os.path.join(ROOT, "bin", "chappe_daemon")
 
 
 def main():
     if not os.path.exists(DAEMON):
-        sys.exit("missing bin/broker_daemon — run `make daemon`")
+        sys.exit("missing bin/chappe_daemon — run `make daemon`")
     if not os.path.exists(os.path.join(ROOT, "bin", "libshm_ring.so")):
         sys.exit("missing bin/libshm_ring.so — run `make libshm_ring`")
 
     topic = "frametest.topic"
     try:
-        os.unlink("/dev/shm/broker_" + topic)  # clear a stale segment
+        os.unlink("/dev/shm/chappe_" + topic)  # clear a stale segment
     except OSError:
         pass
 
-    sock = os.path.join(tempfile.gettempdir(), f"broker_frametest_{os.getpid()}.sock")
+    sock = os.path.join(tempfile.gettempdir(), f"chappe_frametest_{os.getpid()}.sock")
     proc = subprocess.Popen([DAEMON, sock], stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL)
     try:

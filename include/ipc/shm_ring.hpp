@@ -9,7 +9,7 @@ extern "C" {
 #include <stdexcept>
 #include <string>
 
-namespace ipc {
+namespace chappe {
 
 // Non-owning view of a retained slot. Guarantees release() is called exactly
 // once, even on exceptions unwinding through a handler. Move-only: a slot's
@@ -141,4 +141,4 @@ private:
   shm_ring_t *ring_;
 };
 
-} // namespace ipc
+} // namespace chappe

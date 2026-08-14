@@ -15,7 +15,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
-namespace ipc {
+namespace chappe {
 
 // ---- wire codec -----------------------------------------------------------
 // Turns a message into bytes and back. The default handles any trivially
@@ -177,10 +177,10 @@ inline bool topic_matches(const std::string &pattern, const std::string &topic) 
 // TCP variant later without touching the client or daemon.
 
 // Well-known broker socket. Both the daemon and its clients default to this, so
-// the common case never names a path; $BROKER_SOCKET overrides it per-deployment.
-inline std::string default_broker_addr() {
-  const char *env = ::getenv("BROKER_SOCKET");
-  return env ? std::string(env) : std::string("/tmp/broker.sock");
+// the common case never names a path; $CHAPPE_SOCKET overrides it per-deployment.
+inline std::string default_addr() {
+  const char *env = ::getenv("CHAPPE_SOCKET");
+  return env ? std::string(env) : std::string("/tmp/chappe.sock");
 }
 
 inline int unix_connect(const std::string &path) {
@@ -438,4 +438,4 @@ private:
   size_t end_ = 0; // one past last valid byte
 };
 
-} // namespace ipc
+} // namespace chappe

@@ -1,5 +1,5 @@
 #pragma once
-#include "broker.hpp"
+#include "chappe.hpp"
 #include "ipc/frame_handle.hpp"
 #include "ipc/shm_ring.hpp"
 #include "ipc/transport.hpp"
@@ -25,12 +25,14 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-// A client of the broker daemon (see broker_server.hpp). One connection per
+// A client of the broker daemon (see server.hpp). One connection per
 // node; a background reader thread delivers incoming publishes to local
 // handlers and services kv replies. The type-safe surface (publish/subscribe/
 // set/get keyed on a C++ message type) is a client-side convenience over the
 // daemon's string-topic routing: Topic<T>::name is the wire topic and
 // wire_codec<T> is the payload.
+namespace chappe {
+
 class Node {
   using Receiver = std::function<void(const char *, size_t)>;
   // Pattern handlers are untyped: a wildcard spans message types, so the handler
@@ -69,15 +71,15 @@ public:
   Node &operator=(const Node &) = delete;
 
   // Connect to a broker daemon and start the reader thread. Defaults to the
-  // well-known address ($BROKER_SOCKET or /tmp/broker.sock). Handlers may be
+  // well-known address ($CHAPPE_SOCKET or /tmp/chappe.sock). Handlers may be
   // registered before connect() — their subscriptions are flushed to the daemon
   // here. The initial connect must succeed (throws otherwise); if the connection
   // later drops, the reader thread transparently reconnects to the same address
   // and resubscribes.
-  void connect(const std::string &path = ipc::default_broker_addr()) {
+  void connect(const std::string &path = chappe::default_addr()) {
     if (started_)
       throw std::logic_error("node already connected");
-    int fd = ipc::unix_connect(path);
+    int fd = chappe::unix_connect(path);
     if (fd < 0)
       throw std::runtime_error("node connect failed for '" + path + "'");
     path_ = path;
@@ -115,7 +117,7 @@ public:
       v.push_back(PatternReceiver(std::forward<F>(handler)));
     }
     if (first)
-      send(ipc::MSG_SUBSCRIBE, pattern, nullptr, 0);
+      send(chappe::MSG_SUBSCRIBE, pattern, nullptr, 0);
   }
 
   // Stop receiving T's topic: drops every local handler for it, not just one —
@@ -131,7 +133,7 @@ public:
       if (!subs_.erase(Topic<T>::name))
         return;
     }
-    send(ipc::MSG_UNSUBSCRIBE, Topic<T>::name, nullptr, 0);
+    send(chappe::MSG_UNSUBSCRIBE, Topic<T>::name, nullptr, 0);
   }
 
   // unsubscribe() for a wildcard pattern — same all-handlers semantics.
@@ -141,7 +143,7 @@ public:
       if (!pattern_subs_.erase(pattern))
         return;
     }
-    send(ipc::MSG_UNSUBSCRIBE, pattern, nullptr, 0);
+    send(chappe::MSG_UNSUBSCRIBE, pattern, nullptr, 0);
   }
 
   // With retain=true the daemon keeps this as topic T's last value and replays
@@ -153,8 +155,8 @@ public:
     static_assert(Topic<T>::name != nullptr,
                   "publish<T> needs MAKE_TOPIC(T, \"...\")");
     std::vector<char> bytes;
-    ipc::wire_codec<T>::encode(msg, bytes);
-    send(retain ? ipc::MSG_PUBLISH_RETAIN : ipc::MSG_PUBLISH, Topic<T>::name,
+    chappe::wire_codec<T>::encode(msg, bytes);
+    send(retain ? chappe::MSG_PUBLISH_RETAIN : chappe::MSG_PUBLISH, Topic<T>::name,
          bytes.data(), bytes.size());
   }
 
@@ -168,7 +170,7 @@ public:
     require_connected();
     static_assert(Topic<T>::name != nullptr,
                   "clear_retained<T> needs MAKE_TOPIC(T, \"...\")");
-    send(ipc::MSG_PUBLISH_RETAIN, Topic<T>::name, nullptr, 0);
+    send(chappe::MSG_PUBLISH_RETAIN, Topic<T>::name, nullptr, 0);
   }
 
   // Round-trip barrier: returns once the daemon has processed every frame this
@@ -177,7 +179,7 @@ public:
   // immediately (nothing to flush) if called during a reconnect window.
   void sync() {
     require_connected();
-    request(ipc::MSG_PING, "");
+    request(chappe::MSG_PING, "");
   }
 
   // Query the daemon for a human-readable status snapshot (connected clients,
@@ -185,12 +187,12 @@ public:
   // connected.
   std::string info() {
     require_connected();
-    auto reply = request(ipc::MSG_INFO, "");
+    auto reply = request(chappe::MSG_INFO, "");
     return reply ? std::string(reply->begin(), reply->end()) : "";
   }
 
   // ---- frame (shm) API ------------------------------------------------------
-  // A frame topic is a message type deriving from ipc::FrameHandle, registered
+  // A frame topic is a message type deriving from chappe::FrameHandle, registered
   // with MAKE_TOPIC. The backing ring's shm name is derived from Topic<T>::name,
   // so a producer's create_frame_ring<T>() and a consumer's attach_frame_ring<T>()
   // agree on the segment with no shared config. Only the small FrameHandle rides
@@ -198,21 +200,21 @@ public:
 
   template <typename T>
   void create_frame_ring(size_t slot_size, uint32_t num_slots) {
-    static_assert(std::is_base_of_v<ipc::FrameHandle, T>,
-                  "frame topic type must derive from ipc::FrameHandle");
+    static_assert(std::is_base_of_v<chappe::FrameHandle, T>,
+                  "frame topic type must derive from chappe::FrameHandle");
     static_assert(Topic<T>::name != nullptr,
                   "frame topic type needs MAKE_TOPIC(T, \"...\")");
-    rings_.emplace(Topic<T>::name, ipc::SharedMemoryRing::create(
+    rings_.emplace(Topic<T>::name, chappe::SharedMemoryRing::create(
                                        ring_shm_name<T>(), slot_size, num_slots));
   }
 
   template <typename T> void attach_frame_ring() {
-    static_assert(std::is_base_of_v<ipc::FrameHandle, T>,
-                  "frame topic type must derive from ipc::FrameHandle");
+    static_assert(std::is_base_of_v<chappe::FrameHandle, T>,
+                  "frame topic type must derive from chappe::FrameHandle");
     static_assert(Topic<T>::name != nullptr,
                   "frame topic type needs MAKE_TOPIC(T, \"...\")");
     rings_.emplace(Topic<T>::name,
-                   ipc::SharedMemoryRing::attach(ring_shm_name<T>()));
+                   chappe::SharedMemoryRing::attach(ring_shm_name<T>()));
   }
 
   // Producer publish. `writer(void* data, size_t size)` fills the slot in place
@@ -222,8 +224,8 @@ public:
   template <typename T, typename WriterFn>
   bool publish_frame(uint64_t timestamp_ns, uint32_t width, uint32_t height,
                      uint32_t stride, WriterFn &&writer) {
-    static_assert(std::is_base_of_v<ipc::FrameHandle, T>,
-                  "frame topic type must derive from ipc::FrameHandle");
+    static_assert(std::is_base_of_v<chappe::FrameHandle, T>,
+                  "frame topic type must derive from chappe::FrameHandle");
     static_assert(std::is_trivially_copyable_v<T>,
                   "frame message type must be trivially copyable");
     require_connected();
@@ -245,22 +247,22 @@ public:
     it->second.publish(handle.idx);
 
     T msg{};
-    static_cast<ipc::FrameHandle &>(msg) =
-        ipc::FrameHandle{timestamp_ns, width, height, stride};
+    static_cast<chappe::FrameHandle &>(msg) =
+        chappe::FrameHandle{timestamp_ns, width, height, stride};
     std::vector<char> bytes;
-    ipc::wire_codec<T>::encode(msg, bytes);
-    send(ipc::MSG_PUBLISH, Topic<T>::name, bytes.data(), bytes.size());
+    chappe::wire_codec<T>::encode(msg, bytes);
+    send(chappe::MSG_PUBLISH, Topic<T>::name, bytes.data(), bytes.size());
     return true;
   }
 
-  // Consumer subscribe. `handler(const T&, ipc::ShmSlotView&)` runs with an
+  // Consumer subscribe. `handler(const T&, chappe::ShmSlotView&)` runs with an
   // already-retained slot, RAII-released after it returns. Pool-aware, same as
   // subscribe(). The slot is fetched via retain_latest() at handler time, so
   // under async lag it may be a NEWER frame than the FrameHandle describes.
   template <typename T, typename HandlerFn>
   void subscribe_frame(HandlerFn &&handler) {
-    static_assert(std::is_base_of_v<ipc::FrameHandle, T>,
-                  "frame topic type must derive from ipc::FrameHandle");
+    static_assert(std::is_base_of_v<chappe::FrameHandle, T>,
+                  "frame topic type must derive from chappe::FrameHandle");
     std::string key = Topic<T>::name;
     std::function<void(const T &)> h =
         [this, key, handler = std::forward<HandlerFn>(handler)](
@@ -270,7 +272,7 @@ public:
             record_frame_drop();
             return; // no ring attached on this node
           }
-          ipc::ShmSlotView view = it->second.retain_latest();
+          chappe::ShmSlotView view = it->second.retain_latest();
           if (!view) {
             record_frame_drop();
             return; // nothing ready, or producer already reclaimed it
@@ -302,9 +304,9 @@ public:
     uint32_t ms = ttl_to_wire(ttl);
     std::vector<char> bytes;
     if (ms)
-      ipc::append_u32(bytes, ms);
-    ipc::wire_codec<T>::encode(val, bytes);
-    send(ms ? ipc::MSG_KV_SETEX : ipc::MSG_KV_SET, key, bytes.data(),
+      chappe::append_u32(bytes, ms);
+    chappe::wire_codec<T>::encode(val, bytes);
+    send(ms ? chappe::MSG_KV_SETEX : chappe::MSG_KV_SET, key, bytes.data(),
          bytes.size());
   }
 
@@ -323,11 +325,11 @@ public:
   std::optional<int64_t> incr(const std::string &key, int64_t by = 1) {
     require_connected();
     std::vector<char> pl;
-    ipc::wire_codec<int64_t>::encode(by, pl);
-    auto reply = request(ipc::MSG_KV_INCR, key, pl.data(), pl.size());
+    chappe::wire_codec<int64_t>::encode(by, pl);
+    auto reply = request(chappe::MSG_KV_INCR, key, pl.data(), pl.size());
     int64_t out;
     if (!reply ||
-        !ipc::wire_codec<int64_t>::decode(reply->data(), reply->size(), out))
+        !chappe::wire_codec<int64_t>::decode(reply->data(), reply->size(), out))
       return std::nullopt;
     return out;
   }
@@ -341,17 +343,17 @@ public:
              std::chrono::milliseconds ttl = std::chrono::milliseconds::zero()) {
     require_connected();
     std::vector<char> pl;
-    ipc::append_u32(pl, ttl_to_wire(ttl));
-    ipc::wire_codec<T>::encode(val, pl);
+    chappe::append_u32(pl, ttl_to_wire(ttl));
+    chappe::wire_codec<T>::encode(val, pl);
     // has_value(), not a truth test: a win carries zero value bytes.
-    return request(ipc::MSG_KV_SETNX, key, pl.data(), pl.size()).has_value();
+    return request(chappe::MSG_KV_SETNX, key, pl.data(), pl.size()).has_value();
   }
 
   // Remove the key from the daemon's store. Every watcher (this node included)
   // is pushed the deletion and drops its cached value.
   void del(const std::string &key) {
     require_connected();
-    send(ipc::MSG_KV_DEL, key, nullptr, 0);
+    send(chappe::MSG_KV_DEL, key, nullptr, 0);
   }
 
   template <typename T> std::optional<T> get(const std::string &key) {
@@ -362,11 +364,11 @@ public:
         return decode_cached<T>(key);
     }
     // cold path: request the value + start watching, then block for the reply.
-    auto reply = request(ipc::MSG_KV_GET, key);
+    auto reply = request(chappe::MSG_KV_GET, key);
     if (!reply)
       return std::nullopt;
     T out{};
-    if (!ipc::wire_codec<T>::decode(reply->data(), reply->size(), out))
+    if (!chappe::wire_codec<T>::decode(reply->data(), reply->size(), out))
       return std::nullopt;
     return out;
   }
@@ -385,7 +387,7 @@ private:
     // imply a nonexistent subdir. Topics may be '/'-hierarchical, so map inner
     // '/' to '_'. ponytail: "cam/front" and "cam_front" would collide — don't
     // name two topics that way.
-    std::string s = std::string("/broker_") + Topic<T>::name;
+    std::string s = std::string("/chappe_") + Topic<T>::name;
     for (size_t i = 1; i < s.size(); i++)
       if (s[i] == '/')
         s[i] = '_';
@@ -406,11 +408,11 @@ private:
   // reply callers (get/sync) use the return to avoid blocking on a lost frame.
   bool send(uint8_t kind, const std::string &name, const char *payload,
             size_t plen) {
-    auto buf = ipc::build_frame(kind, name, payload, plen);
+    auto buf = chappe::build_frame(kind, name, payload, plen);
     std::lock_guard<std::mutex> lk(send_mu_);
     if (fd_ < 0)
       return false;
-    return ipc::write_full(fd_, buf.data(), buf.size());
+    return chappe::write_full(fd_, buf.data(), buf.size());
   }
 
   template <typename T> void register_topic(std::function<void(const T &)> user) {
@@ -419,7 +421,7 @@ private:
     std::string name = Topic<T>::name;
     Receiver recv = [user = std::move(user)](const char *d, size_t n) {
       T msg{};
-      if (ipc::wire_codec<T>::decode(d, n, msg))
+      if (chappe::wire_codec<T>::decode(d, n, msg))
         user(msg);
     };
     bool first;
@@ -430,7 +432,7 @@ private:
       v.push_back(std::move(recv));
     }
     if (first)
-      send(ipc::MSG_SUBSCRIBE, name, nullptr, 0);
+      send(chappe::MSG_SUBSCRIBE, name, nullptr, 0);
   }
 
   // The wire carries a ttl as u32 milliseconds, so narrow it here instead of
@@ -454,7 +456,7 @@ private:
     uint32_t id = next_req_.fetch_add(1);
     auto fut = register_pending(id);
     std::vector<char> pl;
-    ipc::append_u32(pl, id);
+    chappe::append_u32(pl, id);
     if (n)
       pl.insert(pl.end(), extra, extra + n);
     if (!send(kind, name, pl.data(), pl.size()))
@@ -479,7 +481,7 @@ private:
     if (it == kv_cache_.end())
       return std::nullopt;
     T out{};
-    if (!ipc::wire_codec<T>::decode(it->second.data(), it->second.size(), out))
+    if (!chappe::wire_codec<T>::decode(it->second.data(), it->second.size(), out))
       return std::nullopt;
     return out;
   }
@@ -493,7 +495,7 @@ private:
       if (it != subs_.end())
         fns = it->second;
       for (const auto &ps : pattern_subs_)
-        if (ipc::topic_matches(ps.first, name))
+        if (chappe::topic_matches(ps.first, name))
           pfns.insert(pfns.end(), ps.second.begin(), ps.second.end());
     }
     if (fns.empty() && pfns.empty())
@@ -513,7 +515,7 @@ private:
     }
   }
 
-  void handle_kv_reply(ipc::Frame &f) {
+  void handle_kv_reply(chappe::Frame &f) {
     if (f.payload.size() < 5)
       return;
     uint32_t id;
@@ -533,7 +535,7 @@ private:
     fulfill(id, std::move(val));
   }
 
-  void handle_kv_update(ipc::Frame &f) {
+  void handle_kv_update(chappe::Frame &f) {
     std::lock_guard<std::mutex> lk(kv_mu_);
     kv_watched_.insert(f.name);
     kv_cache_[f.name] = f.payload;
@@ -614,20 +616,20 @@ private:
   }
 
   void read_until_closed(int fd) {
-    ipc::FrameReader reader(fd);
-    ipc::Frame f;
+    chappe::FrameReader reader(fd);
+    chappe::Frame f;
     while (running_.load() && reader.next(f)) {
       switch (f.kind) {
-      case ipc::MSG_PUBLISH:
+      case chappe::MSG_PUBLISH:
         dispatch(f.name, f.payload);
         break;
-      case ipc::MSG_KV_REPLY:
+      case chappe::MSG_KV_REPLY:
         handle_kv_reply(f);
         break;
-      case ipc::MSG_KV_UPDATE:
+      case chappe::MSG_KV_UPDATE:
         handle_kv_update(f);
         break;
-      case ipc::MSG_KV_RESULT: {
+      case chappe::MSG_KV_RESULT: {
         // Unlike MSG_KV_REPLY this must not cache or mark the key watched: the
         // daemon registered no watcher for an incr/setnx, so a cached value
         // would never be refreshed and every later get() would read it.
@@ -641,21 +643,21 @@ private:
         fulfill(id, std::move(val));
         break;
       }
-      case ipc::MSG_KV_DEL: {
+      case chappe::MSG_KV_DEL: {
         // Stay in kv_watched_: the cache is still authoritative for this key, so
         // a later get() reads "absent" locally instead of round-tripping.
         std::lock_guard<std::mutex> lk(kv_mu_);
         kv_cache_.erase(f.name);
         break;
       }
-      case ipc::MSG_PONG:
+      case chappe::MSG_PONG:
         if (f.payload.size() >= 4) {
           uint32_t id;
           std::memcpy(&id, f.payload.data(), 4);
           fulfill(id, std::nullopt);
         }
         break;
-      case ipc::MSG_INFO:
+      case chappe::MSG_INFO:
         if (f.payload.size() >= 4) {
           uint32_t id;
           std::memcpy(&id, f.payload.data(), 4);
@@ -680,7 +682,7 @@ private:
   int reconnect_backoff() {
     int delay_ms = 10;
     while (running_.load()) {
-      int fd = ipc::unix_connect(path_);
+      int fd = chappe::unix_connect(path_);
       if (fd >= 0)
         return fd;
       backoff_sleep(delay_ms);
@@ -703,7 +705,7 @@ private:
         topics.push_back(kv.first);
     }
     for (const auto &t : topics)
-      send(ipc::MSG_SUBSCRIBE, t, nullptr, 0);
+      send(chappe::MSG_SUBSCRIBE, t, nullptr, 0);
   }
 
   std::string name_;
@@ -716,7 +718,7 @@ private:
 
   // rings_ + frame_drops_ before pool_: queued frame tasks touch them as the
   // pool drains during destruction, so they must outlive it.
-  std::unordered_map<std::string, ipc::SharedMemoryRing> rings_;
+  std::unordered_map<std::string, chappe::SharedMemoryRing> rings_;
   std::unique_ptr<std::atomic<uint64_t>> frame_drops_ =
       std::make_unique<std::atomic<uint64_t>>(0);
   std::unique_ptr<ThreadPool> pool_;
@@ -735,3 +737,5 @@ private:
 
   std::thread reader_; // joined explicitly in the destructor before members go
 };
+
+} // namespace chappe

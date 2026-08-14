@@ -17,7 +17,7 @@ jobs:
         run: make daemon libshm_ring
 
       - name: Python client self-check
-        run: python3 python/test_broker.py
+        run: python3 python/test_chappe.py
 
       - name: Python frame self-check
         run: python3 python/test_frames.py

@@ -2,7 +2,7 @@
 // The get/set transport: an authoritative store in the daemon with a
 // read-through cache on each client. A config node writes parameters; a worker
 // node reads them and sees live updates pushed into its cache.
-#include "broker_server.hpp"
+#include "server.hpp"
 #include "node.hpp"
 #include <chrono>
 #include <iostream>
@@ -10,10 +10,10 @@
 #include <thread>
 
 int main() {
-  ipc::BrokerServer broker; // in-process here; real use: run broker_daemon
+  chappe::Server broker; // in-process here; real use: run chappe_daemon
 
-  Node config("config");
-  Node worker("worker");
+  chappe::Node config("config");
+  chappe::Node worker("worker");
   config.connect();
   worker.connect();
 

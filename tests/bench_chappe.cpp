@@ -1,12 +1,12 @@
 // Benchmarks for the broker layer (daemon routing), as opposed to the raw shm
-// ring (see bench_shm_ring). Loopback: an in-process BrokerServer with client
+// ring (see bench_shm_ring). Loopback: an in-process Server with client
 // Nodes over a real unix socket — so this measures framing + socket + daemon
 // routing, just without cross-process scheduling noise.
 //
-//   make bench_broker
-//   ./bin/bench_broker
-#include "broker.hpp"
-#include "broker_server.hpp"
+//   make bench_chappe
+//   ./bin/bench_chappe
+#include "chappe.hpp"
+#include "server.hpp"
 #include "node.hpp"
 #include <algorithm>
 #include <atomic>
@@ -21,6 +21,8 @@
 #include <unistd.h>
 #include <vector>
 
+using namespace chappe;
+
 using clk = std::chrono::steady_clock;
 static double us(clk::duration d) {
   return std::chrono::duration<double, std::micro>(d).count();
@@ -32,7 +34,7 @@ static double secs(clk::duration d) {
 struct Ping { uint32_t seq; };
 struct Pong { uint32_t seq; };
 struct Data { char buf[32]; };
-struct BFrame : ipc::FrameHandle {};
+struct BFrame : chappe::FrameHandle {};
 MAKE_TOPIC(Ping, "ping");
 MAKE_TOPIC(Pong, "pong");
 MAKE_TOPIC(Data, "data");
@@ -193,7 +195,7 @@ static void bench_kv_contention(const std::string &sock, int W, int R) {
 }
 
 static void bench_frames(const std::string &sock, uint32_t w, uint32_t h) {
-  shm_unlink("/broker_bench.frame");
+  shm_unlink("/chappe_bench.frame");
   size_t sz = (size_t)w * h;
   Node prod("fp"), cons("fc");
   prod.connect(sock);
@@ -202,7 +204,7 @@ static void bench_frames(const std::string &sock, uint32_t w, uint32_t h) {
   cons.attach_frame_ring<BFrame>();
 
   std::atomic<int> cnt{0};
-  cons.subscribe_frame<BFrame>([&cnt](const BFrame &, ipc::ShmSlotView &v) {
+  cons.subscribe_frame<BFrame>([&cnt](const BFrame &, chappe::ShmSlotView &v) {
     volatile unsigned char x = *static_cast<const unsigned char *>(v.data());
     (void)x; // touch it so the read isn't elided
     cnt.fetch_add(1, std::memory_order_relaxed);
@@ -233,9 +235,9 @@ static void bench_frames(const std::string &sock, uint32_t w, uint32_t h) {
 }
 
 int main() {
-  std::string sock = "/tmp/broker_bench_" + std::to_string(::getpid()) + ".sock";
+  std::string sock = "/tmp/chappe_bench_" + std::to_string(::getpid()) + ".sock";
   ::unlink(sock.c_str());
-  ipc::BrokerServer server(sock);
+  chappe::Server server(sock);
 
   printf("== broker layer (loopback over unix socket) ==\n");
   bench_pubsub_latency(sock);

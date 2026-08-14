@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Self-check for the Python client. Needs the daemon binary:
-    make daemon && python3 python/test_broker.py
-Launches a broker_daemon on a temp socket and exercises pub/sub + get/set.
+    make daemon && python3 python/test_chappe.py
+Launches a chappe_daemon on a temp socket and exercises pub/sub + get/set.
 """
 import os
 import re
@@ -13,18 +13,18 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import broker
-from broker import Node
+import chappe
+from chappe import Node
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DAEMON = os.path.join(ROOT, "bin", "broker_daemon")
+DAEMON = os.path.join(ROOT, "bin", "chappe_daemon")
 
 
 def main():
     if not os.path.exists(DAEMON):
         sys.exit(f"missing {DAEMON} — run `make daemon` first")
 
-    sock = os.path.join(tempfile.gettempdir(), f"broker_pytest_{os.getpid()}.sock")
+    sock = os.path.join(tempfile.gettempdir(), f"chappe_pytest_{os.getpid()}.sock")
     proc = subprocess.Popen([DAEMON, sock], stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL)
     try:
@@ -103,12 +103,12 @@ def _wait_socket(path, tries=100):
 
 
 class Daemon:
-    """A broker_daemon on its own temp socket, as a context manager. Restartable
+    """A chappe_daemon on its own temp socket, as a context manager. Restartable
     so a check can drop the link under its nodes."""
 
     def __init__(self, tag):
         self.sock = os.path.join(tempfile.gettempdir(),
-                                 f"broker_{tag}_{os.getpid()}.sock")
+                                 f"chappe_{tag}_{os.getpid()}.sock")
         self.proc = None
 
     def start(self):
@@ -137,7 +137,7 @@ class Daemon:
 
 def test_patterns():
     """Wildcard pattern subscriptions: '+' one level, '*' the rest."""
-    sock = os.path.join(tempfile.gettempdir(), f"broker_pypat_{os.getpid()}.sock")
+    sock = os.path.join(tempfile.gettempdir(), f"chappe_pypat_{os.getpid()}.sock")
     proc = subprocess.Popen([DAEMON, sock], stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL)
     _wait_socket(sock)
@@ -172,7 +172,7 @@ def test_patterns():
 def test_reconnect():
     """Node survives a daemon restart: reconnects to the same address and
     resubscribes, and delivery resumes."""
-    sock = os.path.join(tempfile.gettempdir(), f"broker_pyrc_{os.getpid()}.sock")
+    sock = os.path.join(tempfile.gettempdir(), f"chappe_pyrc_{os.getpid()}.sock")
     proc = subprocess.Popen([DAEMON, sock], stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL)
     _wait_socket(sock)
@@ -446,8 +446,8 @@ def test_protocol_parity():
                for m in re.finditer(r"^\s*MSG_(\w+) = (\d+),", f.read(), re.M)}
     assert "KV_DEL" in cpp, cpp  # guards against the regex matching nothing
     for name, value in sorted(cpp.items()):
-        assert getattr(broker, "_" + name, None) == value, \
-            f"MSG_{name}: C++ {value}, Python {getattr(broker, '_' + name, None)}"
+        assert getattr(chappe, "_" + name, None) == value, \
+            f"MSG_{name}: C++ {value}, Python {getattr(chappe, '_' + name, None)}"
     print("python protocol parity self-check OK")
 
 

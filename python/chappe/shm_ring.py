@@ -6,21 +6,27 @@ reimplementing it. Same .c as the C++ side => identical shm layout, so a Python
 node and a C++ node can share the same ring. Build:  make libshm_ring
 """
 import ctypes
+import glob
 import os
 
 _LIB = None
 
 
 def _lib_path():
-    """Locate libshm_ring.so: $BROKER_LIB, then the in-tree build, then the
-    default `make install` locations."""
-    env = os.environ.get("BROKER_LIB")
+    """Locate the ring library: $CHAPPE_LIB, the copy a wheel drops beside this
+    module, then the in-tree build, then the `make install` locations."""
+    env = os.environ.get("CHAPPE_LIB")
     if env:
         return env
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    for c in (os.path.join(root, "bin", "libshm_ring.so"),  # in-tree build
-              "/usr/local/lib/libshm_ring.so",              # make install default
-              "/usr/lib/libshm_ring.so"):
+    here = os.path.dirname(os.path.abspath(__file__))
+    # A wheel builds src/shm_ring.c as an extension, so the name carries the
+    # interpreter's ABI tag (_shm_ring.cpython-313-x86_64-linux-gnu.so) rather
+    # than being a plain libshm_ring.so.
+    packaged = glob.glob(os.path.join(here, "_shm_ring*.so"))
+    root = os.path.dirname(os.path.dirname(here))  # repo root, for an in-tree build
+    for c in (packaged + [os.path.join(root, "bin", "libshm_ring.so"),
+                          "/usr/local/lib/libshm_ring.so",
+                          "/usr/lib/libshm_ring.so"]):
         if os.path.exists(c):
             return c
     return os.path.join(root, "bin", "libshm_ring.so")  # report in-tree path
@@ -32,7 +38,7 @@ def _load():
         return _LIB
     path = _lib_path()
     if not os.path.exists(path):
-        raise RuntimeError(f"missing libshm_ring.so — set $BROKER_LIB or run "
+        raise RuntimeError(f"missing libshm_ring.so — set $CHAPPE_LIB or run "
                            f"`make libshm_ring` (looked for {path})")
     lib = ctypes.CDLL(path)
     P, I32, U32, SZ, CP = (ctypes.c_void_p, ctypes.c_int32, ctypes.c_uint32,

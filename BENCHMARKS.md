@@ -19,7 +19,7 @@ catch regressions and to compare transports/languages, not as headline specs.
 
 ```sh
 make bench_shm_ring                                  # raw shm ring
-make bench_broker                                    # C++ broker layer
+make bench_chappe                                    # C++ broker layer
 make daemon libshm_ring && python3 python/bench.py   # Python client
 ```
 

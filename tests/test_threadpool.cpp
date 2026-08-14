@@ -6,6 +6,8 @@
 #include <thread>
 #include <vector>
 
+using namespace chappe;
+
 // ---- Tests -----------------------------------------------------------------
 
 void test_executes_all_tasks() {

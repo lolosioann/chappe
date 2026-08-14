@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Benchmarks for the Python client, mirroring tests/bench_broker.cpp so the two
-are comparable. Launches its own broker_daemon; frames need the ring lib:
+"""Benchmarks for the Python client, mirroring tests/bench_chappe.cpp so the two
+are comparable. Launches its own chappe_daemon; frames need the ring lib:
     make daemon libshm_ring && python3 python/bench.py
 """
 import os
@@ -13,10 +13,10 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from broker import Node
+from chappe import Node
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DAEMON = os.path.join(ROOT, "bin", "broker_daemon")
+DAEMON = os.path.join(ROOT, "bin", "chappe_daemon")
 HAVE_RING = os.path.exists(os.path.join(ROOT, "bin", "libshm_ring.so"))
 _U32 = struct.Struct("=I")
 
@@ -116,7 +116,7 @@ def bench_kv(sock):
 def bench_frames(sock, W, H):
     topic = "bench.frame"
     try:
-        os.unlink("/dev/shm/broker_" + topic)
+        os.unlink("/dev/shm/chappe_" + topic)
     except OSError:
         pass
     sz = W * H
@@ -149,8 +149,8 @@ def bench_frames(sock, W, H):
 
 def main():
     if not os.path.exists(DAEMON):
-        sys.exit("missing bin/broker_daemon — run `make daemon`")
-    sock = os.path.join(tempfile.gettempdir(), f"broker_bench_{os.getpid()}.sock")
+        sys.exit("missing bin/chappe_daemon — run `make daemon`")
+    sock = os.path.join(tempfile.gettempdir(), f"chappe_bench_{os.getpid()}.sock")
     proc = subprocess.Popen([DAEMON, sock], stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL)
     try:

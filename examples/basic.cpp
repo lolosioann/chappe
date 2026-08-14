@@ -1,8 +1,8 @@
 // examples/basic.cpp
 // demonstrates the full stack: broker daemon + client nodes + async dispatch.
-// The daemon runs in-process here (it's just a BrokerServer); in a real system
-// it would be the separate broker_daemon binary and the nodes separate processes.
-#include "broker_server.hpp"
+// The daemon runs in-process here (it's just a Server); in a real system
+// it would be the separate chappe_daemon binary and the nodes separate processes.
+#include "server.hpp"
 #include "node.hpp"
 #include <atomic>
 #include <chrono>
@@ -31,13 +31,13 @@ MAKE_TOPIC(MotorCommand, "motor/command");
 // ---- Main ------------------------------------------------------------------
 
 int main() {
-  ipc::BrokerServer broker; // in-process here; real use: run broker_daemon
+  chappe::Server broker; // in-process here; real use: run chappe_daemon
 
-  Node sensor("sensor");                 // publishes IMU readings
-  Node vision("vision", 2);              // heavy processing on 2 worker threads
-  Node control("control");              // latency-sensitive, synchronous
-  Node actuator("actuator");            // drives motor commands
-  for (Node *n : {&sensor, &vision, &control, &actuator})
+  chappe::Node sensor("sensor");                 // publishes IMU readings
+  chappe::Node vision("vision", 2);              // heavy processing on 2 worker threads
+  chappe::Node control("control");              // latency-sensitive, synchronous
+  chappe::Node actuator("actuator");            // drives motor commands
+  for (chappe::Node *n : {&sensor, &vision, &control, &actuator})
     n->connect(); // defaults to the well-known broker address
 
   // vision subscribes to IMU, publishes lane estimates asynchronously

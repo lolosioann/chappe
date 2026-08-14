@@ -15,10 +15,10 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from broker import Node
+from chappe import Node
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DAEMON = os.path.join(ROOT, "bin", "broker_daemon")
+DAEMON = os.path.join(ROOT, "bin", "chappe_daemon")
 
 
 def skip(why):
@@ -45,11 +45,11 @@ def main():
         import redis
     except ImportError:
         skip("redis-py not installed")
-    import redis_bridge
+    from chappe import redis_bridge
 
     tmp = tempfile.gettempdir()
     pid = os.getpid()
-    sock = os.path.join(tmp, f"broker_bridge_{pid}.sock")
+    sock = os.path.join(tmp, f"chappe_bridge_{pid}.sock")
     rsock = os.path.join(tmp, f"redis_bridge_{pid}.sock")
     port = 0
 
@@ -78,30 +78,30 @@ def main():
 
             bnode = Node("redis-bridge")
             bnode.connect(sock)
-            bridge = redis_bridge.Bridge(bnode, r, "broker:", 0.02,
-                                         ["broker:cmd/*"])
+            bridge = redis_bridge.Bridge(bnode, r, "chappe:", 0.02,
+                                         ["chappe:cmd/*"])
             threading.Thread(
                 target=bridge.run,
                 args=(["telemetry/*", "cmd/*"], ["state/mode", "state/gear"]),
                 daemon=True).start()
 
             # kv ours -> Redis, including a value written after the bridge is up
-            assert wait_for(lambda: r.get("broker:state/mode") == b"idle")
+            assert wait_for(lambda: r.get("chappe:state/mode") == b"idle")
             app.set("state/gear", struct.pack("=i", 3))
             assert wait_for(
-                lambda: r.get("broker:state/gear") == struct.pack("=i", 3))
+                lambda: r.get("chappe:state/gear") == struct.pack("=i", 3))
 
             # a counter crosses as raw bytes, still readable as an int64
             app.set("state/mode", b"run")
-            assert wait_for(lambda: r.get("broker:state/mode") == b"run")
+            assert wait_for(lambda: r.get("chappe:state/mode") == b"run")
 
             # kv delete propagates as a Redis delete
             app.delete("state/gear")
-            assert wait_for(lambda: r.get("broker:state/gear") is None)
+            assert wait_for(lambda: r.get("chappe:state/gear") is None)
 
             # topics ours -> Redis
             ps = r.pubsub(ignore_subscribe_messages=True)
-            ps.psubscribe("broker:telemetry/*")
+            ps.psubscribe("chappe:telemetry/*")
             time.sleep(0.2)  # let the subscription land before publishing
             app.publish("telemetry/temp", b"41")
             got = wait_for(lambda: ps.get_message(timeout=0.1))
@@ -114,7 +114,7 @@ def main():
                 seen = []
                 mon.subscribe("cmd/stop", lambda p: seen.append(p))
                 mon.sync()
-                r.publish("broker:cmd/stop", b"now")
+                r.publish("chappe:cmd/stop", b"now")
                 assert wait_for(lambda: len(seen) >= 1), "monitor publish lost"
                 assert seen == [b"now"], seen
 

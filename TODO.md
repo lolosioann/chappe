@@ -36,9 +36,9 @@ intact.
       small), REUSEADDR, and keepalive tuned to ~19 s so a peer that loses power
       is noticed. `tcp_listen` takes a bind address with no all-interfaces
       default — with no auth on the wire, that choice *is* the access control.
-      Used only by the link below; `Node` and `BrokerServer` still call the unix
+      Used only by the link below; `Node` and `Server` still call the unix
       ones.
-- [x] **`broker_link`** — done: `include/link.hpp` + `src/broker_link.cpp`, one
+- [x] **`chappe_link`** — done: `include/link.hpp` + `src/chappe_link.cpp`, one
       process per peer, forwarding topics (wildcards) and keys (exact names)
       both ways. It speaks frames straight to the local daemon rather than going
       through `Node`, which is what lets it act on KV_UPDATE/KV_DEL as they
@@ -73,7 +73,7 @@ intact.
 - [x] **Access control.** Done: the listen socket is bound `0600` (umask around
       the bind, so it never exists world-connectable), and every accepted
       connection is checked against `SO_PEERCRED` before it is read from.
-      `BrokerServer(path, {uids...})` swaps the default same-uid rule for an
+      `Server(path, {uids...})` swaps the default same-uid rule for an
       explicit allow-list (complete set, not additive) and opens the socket mode
       so those uids can reach the check. Same-uid is the boundary: a process
       running as you can ptrace you anyway. No per-topic/per-key ACLs — add if a
@@ -128,7 +128,7 @@ durability/HA (see *Resilience*, but mostly out of scope per above).
       `bad_alloc`.
 - [x] **Access control** — done; see *Routing features* above.
 
-## Daemon ceilings (`broker_server.hpp`, marked `ponytail:`)
+## Daemon ceilings (`server.hpp`, marked `ponytail:`)
 
 - [ ] Thread-per-client + global locks. Fine for tens of nodes; move to epoll +
       sharded locks only if client count / fan-out throughput demands it.
@@ -149,7 +149,7 @@ durability/HA (see *Resilience*, but mostly out of scope per above).
       past 5.3 of 8 cores, so it is wakeup-bound, not lock- or CPU-bound. An
       outbox therefore pays off by letting *one* wakeup carry many updates, and
       the bigger win on top of it is conflating repeat updates to the same key.
-      See `make bench_broker` (kv contention section) for the curve.
+      See `make bench_chappe` (kv contention section) for the curve.
 - [ ] KV: single global lock held across pushes. Add per-key versioning if it
       ever stalls under contention.
 

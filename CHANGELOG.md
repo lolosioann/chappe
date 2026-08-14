@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### Renamed to chappe — breaking
+
+Named for Claude Chappe, whose optical telegraph (1792) was a chain of relay
+towers each reading its neighbour and passing the message on — which is what a
+`chappe_daemon` per device joined by `chappe_link` actually is.
+
+- **Everything public moved into `namespace chappe`.** `ipc::` is gone, and so
+  are the global `Node`, `Topic`, `msg_t` and `ThreadPool` — a header installed
+  into a shared prefix has no business claiming names that generic. The classes
+  shed their now-redundant prefix: `ipc::BrokerServer` → `chappe::Server`,
+  `ipc::BrokerLink` → `chappe::Link`.
+- **Files** — `broker.hpp` → `chappe.hpp`, `broker_server.hpp` → `server.hpp`,
+  binaries `broker_daemon`/`broker_link` → `chappe_daemon`/`chappe_link`,
+  headers install to `$PREFIX/include/chappe/`.
+- **Python is a package** — `python/broker.py` → `python/chappe/__init__.py`,
+  with `shm_ring` and `redis_bridge` inside it. `import broker` → `import
+  chappe`; the bridge runs as `python3 -m chappe.redis_bridge`. PyPI already has
+  a `broker` project that installs a top-level `broker` module, so the old name
+  was a collision waiting to happen.
+- **Environment and defaults** — `$BROKER_SOCKET` → `$CHAPPE_SOCKET`,
+  `$BROKER_LIB` → `$CHAPPE_LIB`, `/tmp/broker.sock` → `/tmp/chappe.sock`, and
+  the Redis bridge mirrors to `chappe:<key>` instead of `broker:<key>`. No
+  fallback to the old names: a silent fallback would leave two daemons on two
+  sockets looking like one working system. Update `--prefix` on any monitoring
+  app reading the old keys.
+- `default_broker_addr()` → `default_addr()` in both clients.
+
 ### Messaging
 - **Subscribe before connect** — handlers may be registered before `connect()`,
   which flushes their subscriptions to the daemon. Both clients.
@@ -53,7 +80,7 @@
   so it never exists world-connectable for a window), and every accepted
   connection is checked against `SO_PEERCRED` before it is read from; the
   credentials come from the kernel, so a client can't forge them, and a
-  `getsockopt` failure denies. `BrokerServer(path, {uids...})` replaces the
+  `getsockopt` failure denies. `Server(path, {uids...})` replaces the
   default same-uid rule with an explicit allow-list — the complete set, not an
   addition — and opens the socket mode so those uids can reach the check.
 - **KV cache dropped on disconnect, not on reconnect** — a client used to keep
@@ -96,7 +123,7 @@
   self-checks.
 
 ### Transport
-- **Cross-device links** — `broker_link` joins two devices' buses over TCP,
+- **Cross-device links** — `chappe_link` joins two devices' buses over TCP,
   forwarding chosen topics (wildcards) and keys (exact names) both ways, and
   seeding a key that already had a value when the link comes up. Every device
   keeps its own daemon on its own unix socket, so local traffic never crosses
@@ -129,9 +156,9 @@ routes between many client nodes, with pub/sub, a get/set store, and zero-copy
 shared-memory frames — all under one `Node` interface, in C++ and Python.
 
 ### Messaging
-- **Central broker daemon** (`broker_daemon`) — payload-agnostic string-topic
-  router; clients connect over a Unix socket (`$BROKER_SOCKET` or
-  `/tmp/broker.sock`).
+- **Central broker daemon** (`chappe_daemon`) — payload-agnostic string-topic
+  router; clients connect over a Unix socket (`$CHAPPE_SOCKET` or
+  `/tmp/chappe.sock`).
 - **Typed pub/sub** — topics are C++ types (`MAKE_TOPIC`); dispatch resolved at
   compile time. Publisher noLocal (no self-echo).
 - **Retained messages** — `publish(msg, retain=true)` stores a last-value the

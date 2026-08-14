@@ -20,7 +20,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-namespace ipc {
+namespace chappe {
 
 // Central broker daemon. Accepts many clients on a stream socket and routes
 // between them: PUBLISH goes to every subscriber of the topic (except the
@@ -31,9 +31,9 @@ namespace ipc {
 // ponytail: thread-per-client + global locks. Fine for a robotics node graph
 // (tens of long-lived clients). Move to epoll + sharded locks only if client
 // count or fan-out throughput actually demands it.
-class BrokerServer {
+class Server {
 public:
-  explicit BrokerServer(const std::string &path = default_broker_addr(),
+  explicit Server(const std::string &path = default_addr(),
                         std::set<uid_t> allowed_uids = {})
       : path_(path), allowed_uids_(std::move(allowed_uids)) {
     // An allow-list only works if the listed uids can reach the peercred check
@@ -57,7 +57,7 @@ public:
     }
   }
 
-  ~BrokerServer() {
+  ~Server() {
     stop_threads();
     ::close(listen_fd_);
     { // unblock every client reader so its loop can exit
@@ -78,8 +78,8 @@ public:
     ::unlink(path_.c_str());
   }
 
-  BrokerServer(const BrokerServer &) = delete;
-  BrokerServer &operator=(const BrokerServer &) = delete;
+  Server(const Server &) = delete;
+  Server &operator=(const Server &) = delete;
 
 private:
   struct Client {
@@ -593,4 +593,4 @@ private:
   std::thread sweep_thread_;
 };
 
-} // namespace ipc
+} // namespace chappe

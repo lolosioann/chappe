@@ -1,12 +1,12 @@
 """Pure-Python client for the broker daemon.
 
 Speaks the same wire protocol as the C++ Node (see include/ipc/transport.hpp),
-so Python nodes interoperate with C++ nodes over the same broker_daemon — no
+so Python nodes interoperate with C++ nodes over the same chappe_daemon — no
 compilation, no dependencies, stdlib only.
 
 Covers pub/sub, the get/set store, and the zero-copy shared-memory frame
-transport (the last via python/shm_ring.py, a ctypes binding to the same C ring
-the C++ side uses — so it needs `make libshm_ring`).
+transport (the last via chappe/shm_ring.py, a ctypes binding to the same C ring
+the C++ side uses — a wheel builds it in, otherwise `make libshm_ring`).
 
 Messages are bytes — bring your own serialization (struct, json, msgpack, ...).
 The daemon routes opaque payloads by string topic, so to interoperate with a
@@ -43,7 +43,7 @@ def _has_wildcard(s):
 
 def _topic_matches(pattern, topic):
     """Bash-path-like match over '/'-separated levels: '+' one level, '*' the
-    rest. Mirrors ipc::topic_matches in include/ipc/transport.hpp."""
+    rest. Mirrors chappe::topic_matches in include/ipc/transport.hpp."""
     p, t = pattern.split("/"), topic.split("/")
     for i, level in enumerate(p):
         if level == "*":
@@ -57,8 +57,8 @@ def _topic_matches(pattern, topic):
     return len(p) == len(t)
 
 
-def default_broker_addr():
-    return os.environ.get("BROKER_SOCKET", "/tmp/broker.sock")
+def default_addr():
+    return os.environ.get("CHAPPE_SOCKET", "/tmp/chappe.sock")
 
 
 class Node:
@@ -97,7 +97,7 @@ class Node:
         transparently."""
         if self._started:
             raise RuntimeError("node already connected")
-        addr = addr or default_broker_addr()
+        addr = addr or default_addr()
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.connect(addr)  # initial connect must succeed
         self._addr = addr
@@ -280,16 +280,16 @@ class Node:
     @staticmethod
     def _ring_shm_name(topic):
         # Match ring_shm_name() in node.hpp: leading '/', inner '/' -> '_'.
-        return "/broker_" + topic.replace("/", "_")
+        return "/chappe_" + topic.replace("/", "_")
 
     def create_frame_ring(self, topic, slot_size, num_slots):
         """Producer: own the ring for `topic`."""
-        from shm_ring import Ring
+        from .shm_ring import Ring
         self._rings[topic] = Ring.create(self._ring_shm_name(topic), slot_size, num_slots)
 
     def attach_frame_ring(self, topic):
         """Consumer: attach to the ring another node created for `topic`."""
-        from shm_ring import Ring
+        from .shm_ring import Ring
         self._rings[topic] = Ring.attach(self._ring_shm_name(topic))
 
     def publish_frame(self, topic, timestamp_ns, width, height, stride, data):

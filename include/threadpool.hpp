@@ -7,6 +7,8 @@
 #include <thread>
 #include <vector>
 
+namespace chappe {
+
 class ThreadPool {
   std::vector<std::thread> workers_;
   std::queue<std::function<void()>> tasks_;
@@ -73,3 +75,5 @@ public:
   ThreadPool(const ThreadPool &) = delete;
   ThreadPool &operator=(const ThreadPool &) = delete;
 };
+
+} // namespace chappe

@@ -1,6 +1,6 @@
 // tests/test_node.cpp
-#include "broker.hpp"
-#include "broker_server.hpp"
+#include "chappe.hpp"
+#include "server.hpp"
 #include "node.hpp"
 #include "test.hpp"
 #include <atomic>
@@ -15,6 +15,8 @@
 #include <unistd.h>
 #include <vector>
 
+using namespace chappe;
+
 // ---- Messages --------------------------------------------------------------
 
 struct Cmd {
@@ -27,7 +29,7 @@ struct Event {
 MAKE_TOPIC(Cmd, "cmd");
 MAKE_TOPIC(Event, "event");
 
-namespace ipc {
+namespace chappe {
 template <> struct wire_codec<Event> {
   static void encode(const Event &e, std::vector<char> &out) {
     out.insert(out.end(), e.name.begin(), e.name.end());
@@ -37,10 +39,10 @@ template <> struct wire_codec<Event> {
     return true;
   }
 };
-} // namespace ipc
+} // namespace chappe
 
 static std::string sock_path(const char *tag) {
-  return std::string("/tmp/broker_node_") + tag + "_" +
+  return std::string("/tmp/chappe_node_") + tag + "_" +
          std::to_string(::getpid()) + ".sock";
 }
 
@@ -78,7 +80,7 @@ void test_node_name() {
 
 void test_two_nodes_communicate() {
   auto p = sock_path("comm");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
   Node sender("sender");
   Node receiver("receiver");
   sender.connect(p);
@@ -96,7 +98,7 @@ void test_two_nodes_communicate() {
 
 void test_node_multiple_topic_subscriptions() {
   auto p = sock_path("multi");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
   Node pub("pub");
   Node node("multi");
   pub.connect(p);
@@ -118,7 +120,7 @@ void test_node_multiple_topic_subscriptions() {
 
 void test_node_async_dispatch() {
   auto p = sock_path("async");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
   Node pub("pub");
   Node node("async_node", 2); // 2 worker threads
   pub.connect(p);
@@ -140,7 +142,7 @@ void test_node_async_dispatch() {
 // join its pool cleanly, no hang or crash.
 void test_async_node_teardown_clean() {
   auto p = sock_path("teardown");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
   Node pub("pub");
   pub.connect(p);
 
@@ -178,7 +180,7 @@ void test_publish_requires_connection() {
 // so the first publish after it is routed here.
 void test_subscribe_before_connect() {
   auto p = sock_path("presub");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
   Node sub("sub");
   Node pub("pub");
 
@@ -195,7 +197,7 @@ void test_subscribe_before_connect() {
 // The daemon drops a topic once its last subscriber disconnects.
 void test_topic_dropped_when_last_subscriber_leaves() {
   auto p = sock_path("reap");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
   Node probe("probe");
   probe.connect(p);
   {
@@ -220,7 +222,7 @@ void test_topic_dropped_when_last_subscriber_leaves() {
 // life. kv_watchers counts entries in watchers_, so it distinguishes the two.
 void test_watcher_dropped_when_last_watcher_leaves() {
   auto p = sock_path("watchreap");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
   Node probe("probe");
   probe.connect(p);
   probe.set<int>("k", 1);
@@ -241,7 +243,7 @@ void test_watcher_dropped_when_last_watcher_leaves() {
 // subscription.
 void test_unsubscribe() {
   auto p = sock_path("unsub");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
   Node pub("pub");
   Node sub("sub");
   pub.connect(p);
@@ -284,7 +286,7 @@ void test_unsubscribe() {
 // the handler map entry, so resubscribe() has nothing to re-send for it.
 void test_unsubscribe_survives_reconnect() {
   auto p = sock_path("unsubrecon");
-  auto server = std::make_unique<ipc::BrokerServer>(p);
+  auto server = std::make_unique<chappe::Server>(p);
   Node pub("pub");
   Node sub("sub");
   pub.connect(p);
@@ -300,7 +302,7 @@ void test_unsubscribe_survives_reconnect() {
 
   server.reset();
   ASSERT_TRUE(wait_until([&] { return !sub.connected() && !pub.connected(); }));
-  server = std::make_unique<ipc::BrokerServer>(p);
+  server = std::make_unique<chappe::Server>(p);
 
   // The control topic flowing again means both nodes reconnected and sub's
   // resubscribe() ran to completion — cmd's SUBSCRIBE would be in that same
@@ -327,33 +329,33 @@ void test_unsubscribe_survives_reconnect() {
 // served throughout.
 void test_slow_consumer_dropped() {
   auto p = sock_path("slow");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
   Node probe("probe");
   probe.connect(p);
 
   // Raw client: subscribes to "wedge", watches "live", and reads nothing ever.
-  int wedged = ipc::unix_connect(p);
+  int wedged = chappe::unix_connect(p);
   ASSERT_TRUE(wedged >= 0);
-  auto sf = ipc::build_frame(ipc::MSG_SUBSCRIBE, "wedge", nullptr, 0);
-  ipc::write_full(wedged, sf.data(), sf.size());
+  auto sf = chappe::build_frame(chappe::MSG_SUBSCRIBE, "wedge", nullptr, 0);
+  chappe::write_full(wedged, sf.data(), sf.size());
   std::vector<char> req;
-  ipc::append_u32(req, 1); // req_id of a KV_GET whose reply is never read
-  auto gf = ipc::build_frame(ipc::MSG_KV_GET, "live", req.data(), req.size());
-  ipc::write_full(wedged, gf.data(), gf.size());
+  chappe::append_u32(req, 1); // req_id of a KV_GET whose reply is never read
+  auto gf = chappe::build_frame(chappe::MSG_KV_GET, "live", req.data(), req.size());
+  chappe::write_full(wedged, gf.data(), gf.size());
   ASSERT_TRUE(wait_until(
       [&] { return probe.info().find("wedge=1") != std::string::npos; }));
 
   // Blast 4 MB at it, far past any socket buffer. Our own writes stall once the
   // daemon's thread for them is stuck on the wedged peer, so bound them too.
   std::thread blaster([&] {
-    int fd = ipc::unix_connect(p);
+    int fd = chappe::unix_connect(p);
     timeval tv{4, 0};
     ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
     std::vector<char> big(64 * 1024, 'x');
     auto f =
-        ipc::build_frame(ipc::MSG_PUBLISH, "wedge", big.data(), big.size());
+        chappe::build_frame(chappe::MSG_PUBLISH, "wedge", big.data(), big.size());
     for (int i = 0; i < 64; i++)
-      if (!ipc::write_full(fd, f.data(), f.size()))
+      if (!chappe::write_full(fd, f.data(), f.size()))
         break;
     ::close(fd);
   });
@@ -378,7 +380,7 @@ void test_slow_consumer_dropped() {
 // cached value goes from present to absent.
 void test_kv_delete() {
   auto p = sock_path("kvdel");
-  auto server = std::make_unique<ipc::BrokerServer>(p);
+  auto server = std::make_unique<chappe::Server>(p);
   Node a("a");
   Node b("b");
   a.connect(p);
@@ -410,7 +412,7 @@ void test_kv_delete() {
 // to absent.
 void test_kv_ttl_expires() {
   auto p = sock_path("ttl");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
   Node a("a");
   a.connect(p);
 
@@ -426,7 +428,7 @@ void test_kv_ttl_expires() {
 // well past the deadline it used to have.
 void test_plain_set_clears_ttl() {
   auto p = sock_path("ttlclear");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
   Node a("a");
   a.connect(p);
 
@@ -448,7 +450,7 @@ void test_plain_set_clears_ttl() {
 // answered from the local cache that read never touches the daemon.
 void test_ttl_pushed_to_watchers() {
   auto p = sock_path("ttlpush");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
   Node a("a");
   Node b("b");
   a.connect(p);
@@ -469,7 +471,7 @@ void test_ttl_pushed_to_watchers() {
 // lock — each the exact inverse of what the caller asked for.
 void test_out_of_range_ttl() {
   auto p = sock_path("ttlrange");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
   Node a("a");
   a.connect(p);
 
@@ -488,7 +490,7 @@ void test_out_of_range_ttl() {
 // Otherwise a heartbeat key reads "alive" for a dead writer for a whole outage.
 void test_cache_dropped_while_disconnected() {
   auto p = sock_path("kvdrop");
-  auto server = std::make_unique<ipc::BrokerServer>(p);
+  auto server = std::make_unique<chappe::Server>(p);
   Node a("a");
   a.connect(p);
 
@@ -504,7 +506,7 @@ void test_cache_dropped_while_disconnected() {
 // get<int64_t>() decodes, so a counter is readable as an ordinary value.
 void test_incr() {
   auto p = sock_path("incr");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
   Node a("a");
   a.connect(p);
 
@@ -517,7 +519,7 @@ void test_incr() {
 // incr reports it and leaves the key exactly as it was.
 void test_incr_rejects_non_integer() {
   auto p = sock_path("incrbad");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
   Node a("a");
   a.connect(p);
 
@@ -531,7 +533,7 @@ void test_incr_rejects_non_integer() {
 // warm-cached the key reads the new total with no round-trip of its own.
 void test_incr_updates_watchers() {
   auto p = sock_path("incrwatch");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
   Node a("a");
   Node b("b");
   a.connect(p);
@@ -549,7 +551,7 @@ void test_incr_updates_watchers() {
 // written over the winner's.
 void test_setnx() {
   auto p = sock_path("setnx");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
   Node a("a");
   Node b("b");
   a.connect(p);
@@ -564,7 +566,7 @@ void test_setnx() {
 // ttl expires the key, and the next node acquires it.
 void test_setnx_ttl_releases() {
   auto p = sock_path("setnxttl");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
   Node a("a");
   Node b("b");
   a.connect(p);
@@ -579,7 +581,7 @@ void test_setnx_ttl_releases() {
 // so nobody else can even open a connection to speak the protocol over.
 void test_socket_mode_is_private() {
   auto p = sock_path("mode");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
 
   struct stat st;
   ASSERT_EQ(::stat(p.c_str(), &st), 0);
@@ -592,8 +594,8 @@ void test_socket_mode_is_private() {
 // sees EOF. A raw fd rather than a Node: a Node would reconnect-loop on this.
 void test_foreign_uid_rejected() {
   auto p = sock_path("uid");
-  ipc::BrokerServer server(p, {::geteuid() + 1}); // guaranteed not to be us
-  int fd = ipc::unix_connect(p);
+  chappe::Server server(p, {::geteuid() + 1}); // guaranteed not to be us
+  int fd = chappe::unix_connect(p);
   ASSERT_TRUE(fd >= 0);
 
   timeval tv{2, 0}; // a daemon that lets us in must fail here, not hang
@@ -607,7 +609,7 @@ void test_foreign_uid_rejected() {
 // after it are replayed nothing.
 void test_clear_retained() {
   auto p = sock_path("clearret");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
   Node pub("pub");
   pub.connect(p);
   pub.publish(Cmd{7}, /*retain=*/true);
@@ -639,7 +641,7 @@ void test_clear_retained() {
 // stacks would.
 void test_daemon_reaps_reader_threads() {
   auto p = sock_path("threads");
-  ipc::BrokerServer server(p);
+  chappe::Server server(p);
   Node warm("warm");
   warm.connect(p);
   warm.sync();
@@ -659,7 +661,7 @@ void test_daemon_reaps_reader_threads() {
 void test_socket_file_removed_on_shutdown() {
   auto p = sock_path("unlink");
   {
-    ipc::BrokerServer server(p);
+    chappe::Server server(p);
     ASSERT_TRUE(::access(p.c_str(), F_OK) == 0);
   }
   ASSERT_TRUE(::access(p.c_str(), F_OK) != 0);

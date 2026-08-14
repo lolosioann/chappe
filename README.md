@@ -1,10 +1,10 @@
-# broker
+# chappe
 
 A small central message broker for C++17, IPC-first — think MQTT pub/sub +
 redis get/set + zero-copy shared-memory frames, unified under one client
 interface:
 
-- **central daemon** — a `broker_daemon` process routes between many client
+- **central daemon** — a `chappe_daemon` process routes between many client
   nodes. Publishers and subscribers don't know each other; they only share a
   topic name.
 - **pub/sub** — publish to a topic, and every node subscribed to it receives the
@@ -21,7 +21,7 @@ Header-only except for the C shared-memory ring.
 ## Build
 
 ```sh
-make daemon     # build the broker_daemon binary
+make daemon     # build the chappe_daemon binary
 make test       # build + run all suites
 make examples   # build + run examples/basic.cpp (runs an in-process daemon)
 ```
@@ -36,28 +36,28 @@ make install PREFIX=~/.local      # or a user prefix, no sudo
 make uninstall                    # same PREFIX/DESTDIR removes it
 ```
 
-Installs the `broker_daemon` binary, `libshm_ring.so`, the C++ headers under
-`include/broker/`, and the Python modules. It prints the exact flags; in short:
+Installs the `chappe_daemon` binary, `libshm_ring.so`, the C++ headers under
+`include/chappe/`, and the Python modules. It prints the exact flags; in short:
 
-- **C++:** `-I$PREFIX/include/broker`, link `$PREFIX/lib/libshm_ring.so -lrt`.
-- **Python:** `export PYTHONPATH=$PREFIX/lib/broker/python` (set `$BROKER_LIB`
+- **C++:** `-I$PREFIX/include/chappe`, link `$PREFIX/lib/libshm_ring.so -lrt`.
+- **Python:** `export PYTHONPATH=$PREFIX/lib/chappe/python` (set `$CHAPPE_LIB`
   if `libshm_ring.so` isn't on a standard path). Supports `DESTDIR` for staged
   packaging.
 
 ## Run the daemon
 
 ```sh
-./bin/broker_daemon                      # listens on the default address
-./bin/broker_daemon /tmp/mybroker.sock   # or an explicit path
+./bin/chappe_daemon                      # listens on the default address
+./bin/chappe_daemon /tmp/mychappe.sock   # or an explicit path
 ```
 
-Both the daemon and its clients default to the well-known address — `$BROKER_SOCKET`
-if set, otherwise `/tmp/broker.sock` — so the common case never names a path.
+Both the daemon and its clients default to the well-known address — `$CHAPPE_SOCKET`
+if set, otherwise `/tmp/chappe.sock` — so the common case never names a path.
 Ctrl-C / SIGTERM stops the daemon.
 
 The socket is created `0600`, so only the uid running the daemon can connect —
 worth knowing before you put it in a shared `/tmp`. To serve other users, pass
-`BrokerServer` an allow-list of uids (`BrokerServer(path, {1000, 1001})`); the
+`Server` an allow-list of uids (`Server(path, {1000, 1001})`); the
 socket then opens up and `SO_PEERCRED` becomes the gate instead. The list is the
 complete set, not an addition, so the daemon's own uid needs to be in it too.
 
@@ -70,14 +70,14 @@ struct IMUReading { float ax, ay, az; };
 MAKE_TOPIC(IMUReading, "imu/reading");   // '/'-separated for wildcard matching
 ```
 
-Then drive everything through `Node`.
+Then drive everything through `chappe::Node`.
 
 ### Pub/sub
 
 ```cpp
-Node sensor("sensor");
-Node vision("vision", 2);   // 2 worker threads => handlers run on a pool
-sensor.connect();           // default address; or connect("/tmp/mybroker.sock")
+chappe::Node sensor("sensor");
+chappe::Node vision("vision", 2);   // 2 worker threads => handlers run on a pool
+sensor.connect();           // default address; or connect("/tmp/mychappe.sock")
 vision.connect();
 
 vision.subscribe([](const IMUReading &m) { /* ... */ });  // type deduced
@@ -150,10 +150,10 @@ retained replay don't participate in pattern matching (yet).
 Only the lightweight metadata (`FrameHandle`: timestamp, width, height, stride)
 goes through the broker; the bytes live in a shared-memory ring keyed by the
 topic name, so producer and consumer agree on the segment with no shared config.
-A frame topic derives from `ipc::FrameHandle`:
+A frame topic derives from `chappe::FrameHandle`:
 
 ```cpp
-struct FrontCam : ipc::FrameHandle {};
+struct FrontCam : chappe::FrameHandle {};
 MAKE_TOPIC(FrontCam, "cam/front");
 
 // producer
@@ -164,7 +164,7 @@ producer.publish_frame<FrontCam>(ts, w, h, w, [&](void *dst, size_t n) {
 
 // consumer
 consumer.attach_frame_ring<FrontCam>();
-consumer.subscribe_frame<FrontCam>([](const FrontCam &meta, ipc::ShmSlotView &slot) {
+consumer.subscribe_frame<FrontCam>([](const FrontCam &meta, chappe::ShmSlotView &slot) {
   process(slot.data(), slot.size()); // slot auto-released after handler returns
 });
 ```
@@ -235,16 +235,16 @@ the snapshot once its last subscriber/watcher disconnects.
 
 ## Python
 
-`python/broker.py` is a Python client that speaks the same wire protocol, so
-Python nodes interoperate with C++ nodes over the same `broker_daemon`. Messages
+`python/chappe/` is a Python client that speaks the same wire protocol, so
+Python nodes interoperate with C++ nodes over the same `chappe_daemon`. Messages
 are `bytes` — bring your own serialization:
 
 ```python
-from broker import Node
+from chappe import Node
 import struct
 
 with Node("py") as node:
-    node.connect()                                   # $BROKER_SOCKET or /tmp/broker.sock
+    node.connect()                                   # $CHAPPE_SOCKET or /tmp/chappe.sock
     node.subscribe("tick", lambda p: print(struct.unpack("=i", p)[0]))
     node.sync()
     node.publish("tick", struct.pack("=i", 42))
@@ -276,31 +276,31 @@ messages directly — a C++ `struct Tick { int seq; }` is `struct.pack("=i", seq
   vision.subscribe_frame("cam/front", lambda meta, view: ...)  # zero-copy view
   ```
 
-Self-checks: `make daemon libshm_ring` then `python3 python/test_broker.py` and
+Self-checks: `make daemon libshm_ring` then `python3 python/test_chappe.py` and
 `python3 python/test_frames.py`. Demos (with a daemon running): `example.py`,
 `example_frames.py`.
 
 ## Redis bridge
 
-`python/redis_bridge.py` mirrors the bus into Redis, so a monitoring app that
+`chappe.redis_bridge` mirrors the bus into Redis, so a monitoring app that
 already speaks Redis can watch the system's state and publish into it without
 learning our wire protocol:
 
 ```sh
-python3 python/redis_bridge.py --key state/mode --key state/gear \
+python3 -m chappe.redis_bridge --key state/mode --key state/gear \
                                --out 'telemetry/*' --in 'cmd/*'
 ```
 
 It is an ordinary client — a separate process, no daemon changes, and nothing in
 the broker depends on Redis. Only the bridge needs `redis-py`.
 
-- **kv goes out only.** Mirrored keys are copied to `broker:<key>` byte for byte;
+- **kv goes out only.** Mirrored keys are copied to `chappe:<key>` byte for byte;
   a delete or an expired TTL removes the Redis key. Nothing writes back, so
   there is no loop to break and no conflict to resolve. A counter written by
   `incr` stays 8 native-endian bytes, so it still reads back through
   `get<int64_t>()` — `redis-cli` will show it as binary and Redis `INCR` won't
   work on it; unpack it instead.
-- **Topics go both ways.** `--out` mirrors bus topics to `broker:<topic>`
+- **Topics go both ways.** `--out` mirrors bus topics to `chappe:<topic>`
   channels, `--in` mirrors Redis channels back onto the bus. A topic that is
   both still arrives exactly once: Redis echoes our own publish back to us, and
   the bridge drops that copy. The other direction needs no such care because
@@ -320,15 +320,15 @@ a `redis-server` on PATH).
 
 ## Cross-device links
 
-Every device runs its own daemon on its own unix socket, and `broker_link` joins
+Every device runs its own daemon on its own unix socket, and `chappe_link` joins
 two of them over TCP. One side listens, the other connects; they are otherwise
 symmetric:
 
 ```sh
 # device A
-./bin/broker_link --listen 0.0.0.0:7000 --topic 'cmd/*' --key state/mode
+./bin/chappe_link --listen 0.0.0.0:7000 --topic 'cmd/*' --key state/mode
 # device B
-./bin/broker_link --peer a.local:7000   --topic 'cmd/*' --key state/mode
+./bin/chappe_link --peer a.local:7000   --topic 'cmd/*' --key state/mode
 ```
 
 A publish on either device reaches subscribers on the other; a `set` or `del` on
@@ -363,18 +363,18 @@ keeps its unix socket and its `SO_PEERCRED` uid gate.
 
 ```sh
 make bench_shm_ring      # raw shm ring: throughput / latency / contended
-make bench_broker        # C++ broker layer: pub/sub, kv, frames
+make bench_chappe        # C++ broker layer: pub/sub, kv, frames
 make daemon libshm_ring && python3 python/bench.py   # same, Python client
 ```
 
-`bench_broker` and `bench.py` measure the same things (pub/sub RTT + throughput,
+`bench_chappe` and `bench.py` measure the same things (pub/sub RTT + throughput,
 kv cold/warm/set, frame throughput) so C++ and Python are directly comparable.
 All are loopback on one host — real numbers depend on the machine; treat them as
 relative, not absolute. A captured snapshot lives in [BENCHMARKS.md](BENCHMARKS.md).
 
 ## Implementation notes
 
-- **Daemon** (`include/broker_server.hpp`) — thread-per-client, a
+- **Daemon** (`include/server.hpp`) — thread-per-client, a
   `topic → {subscribers}` routing table, and the authoritative KV store with a
   `key → {watchers}` set. It only ever sees `[kind][topic/key][opaque bytes]`;
   all typing (`MAKE_TOPIC`, `wire_codec`) stays on the clients. Fine for tens of
@@ -415,16 +415,19 @@ relative, not absolute. A captured snapshot lives in [BENCHMARKS.md](BENCHMARKS.
 ## Layout
 
 ```
-include/broker.hpp        Topic/MAKE_TOPIC + handler-type deduction
-include/broker_server.hpp central broker daemon (BrokerServer)
-include/node.hpp          Node client (pub/sub + frames + get/set)
+include/chappe.hpp        Topic/MAKE_TOPIC + handler-type deduction
+include/server.hpp        central broker daemon (chappe::Server)
+include/node.hpp          chappe::Node client (pub/sub + frames + get/set)
+include/link.hpp          cross-device link (chappe::Link)
 include/threadpool.hpp    fixed-size worker pool
 include/ipc/              FrameHandle, shm ring C++ wrappers, wire protocol
 include/shm_ring.h        C shm ring interface
 src/shm_ring.c            C shm ring implementation
-src/broker_daemon.cpp     the daemon main()
+src/chappe_daemon.cpp     the daemon main()
+src/chappe_link.cpp       the link main()
 examples/                 runnable demos, one per transport (see below)
-python/                   Python client: broker.py + shm_ring.py (ctypes) + demos + checks
+python/chappe/            Python client: __init__.py + shm_ring.py (ctypes) + redis_bridge.py
+python/                   demos + self-checks
 tests/                    per-layer suites + shm ring stress/bench
 ```
 
@@ -441,10 +444,10 @@ tests/                    per-layer suites + shm ring stress/bench
 
 The first three embed the daemon in-process to stay trivially runnable. The
 producer/consumer pair is the genuine multi-process path — run each in its own
-terminal against a `broker_daemon`, sharing the message contract in `tick.hpp`:
+terminal against a `chappe_daemon`, sharing the message contract in `tick.hpp`:
 
 ```sh
-./bin/broker_daemon      # terminal 1
+./bin/chappe_daemon      # terminal 1
 ./bin/consumer           # terminal 2 — subscribes, prints ticks
 ./bin/producer           # terminal 3 — publishes 10 ticks
 ```

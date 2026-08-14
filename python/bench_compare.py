@@ -3,7 +3,7 @@
 through ONE Python timing harness so the numbers are comparable. Each broker is
 launched locally (unix socket / loopback TCP), in-memory, no persistence.
 
-Needs: bin/broker_daemon, redis-server, mosquitto on PATH, and a venv with
+Needs: bin/chappe_daemon, redis-server, mosquitto on PATH, and a venv with
 `redis` and `paho-mqtt<2`. Run with that venv's python:
     make daemon
     <venv>/bin/python python/bench_compare.py
@@ -18,13 +18,13 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from broker import Node
+from chappe import Node
 
 import redis
 import paho.mqtt.client as mqtt
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DAEMON = os.path.join(ROOT, "bin", "broker_daemon")
+DAEMON = os.path.join(ROOT, "bin", "chappe_daemon")
 TMP = tempfile.gettempdir()
 PID = os.getpid()
 
@@ -224,7 +224,7 @@ def wait_tcp(host, port, tries=100):
 def launch_ours():
     sock = os.path.join(TMP, f"cmp_ours_{PID}.sock")
     if not os.path.exists(DAEMON):
-        raise RuntimeError("missing bin/broker_daemon — run `make daemon`")
+        raise RuntimeError("missing bin/chappe_daemon — run `make daemon`")
     p = subprocess.Popen([DAEMON, sock], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if not wait_socket_file(sock):
         raise RuntimeError("ours daemon did not start")

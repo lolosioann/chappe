@@ -2,8 +2,8 @@
 // process: two daemons on two unix sockets, two links joined by a socketpair
 // standing in for the TCP hop (transport.hpp's TCP helpers are covered on their
 // own in test_transport.cpp; what matters here is the forwarding logic).
-#include "broker.hpp"
-#include "broker_server.hpp"
+#include "chappe.hpp"
+#include "server.hpp"
 #include "link.hpp"
 #include "node.hpp"
 #include "test.hpp"
@@ -14,6 +14,8 @@
 #include <sys/socket.h>
 #include <thread>
 #include <unistd.h>
+
+using namespace chappe;
 
 struct Cmd {
   int32_t value;
@@ -26,7 +28,7 @@ struct Priv {
 MAKE_TOPIC(Priv, "private/thing");
 
 static std::string sock_path(const char *tag) {
-  return std::string("/tmp/broker_link_") + tag + "_" +
+  return std::string("/tmp/chappe_link_") + tag + "_" +
          std::to_string(::getpid()) + ".sock";
 }
 
@@ -43,8 +45,8 @@ static bool wait_until(const std::function<bool()> &pred, int timeout_ms = 2000)
 // say is "a on device A, b on device B".
 struct TwoDevices {
   std::string pa, pb;
-  std::unique_ptr<ipc::BrokerServer> da, db;
-  std::unique_ptr<ipc::BrokerLink> la, lb;
+  std::unique_ptr<chappe::Server> da, db;
+  std::unique_ptr<chappe::Link> la, lb;
 
   // The two sides take separate configs on purpose: the link's filters only
   // ever bite on what ARRIVES from the peer. Outbound is already limited by
@@ -56,15 +58,15 @@ struct TwoDevices {
              std::vector<std::string> bkeys = {}) {
     pa = sock_path((std::string(tag) + "a").c_str());
     pb = sock_path((std::string(tag) + "b").c_str());
-    da = std::make_unique<ipc::BrokerServer>(pa);
-    db = std::make_unique<ipc::BrokerServer>(pb);
+    da = std::make_unique<chappe::Server>(pa);
+    db = std::make_unique<chappe::Server>(pb);
     int sv[2];
     ::socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
-    ipc::BrokerLink::Config ca{pa, topics, keys},
+    chappe::Link::Config ca{pa, topics, keys},
         cb{pb, btopics.empty() ? topics : btopics,
            bkeys.empty() ? keys : bkeys};
-    la = std::make_unique<ipc::BrokerLink>(ca, sv[0]);
-    lb = std::make_unique<ipc::BrokerLink>(cb, sv[1]);
+    la = std::make_unique<chappe::Link>(ca, sv[0]);
+    lb = std::make_unique<chappe::Link>(cb, sv[1]);
   }
 };
 
@@ -142,31 +144,31 @@ void test_link_kv_does_not_ping_pong() {
 
   // Raw watcher on device A: the get registers the watch, and every later
   // change then arrives as its own KV_UPDATE frame, which is what we count.
-  int fd = ipc::unix_connect(d.pa);
+  int fd = chappe::unix_connect(d.pa);
   ASSERT_TRUE(fd >= 0);
   timeval tv{0, 200000}; // a quiet gap is what ends the count
   ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
   std::vector<char> pl;
-  ipc::append_u32(pl, 1);
+  chappe::append_u32(pl, 1);
   auto req =
-      ipc::build_frame(ipc::MSG_KV_GET, "state/mode", pl.data(), pl.size());
-  ipc::write_full(fd, req.data(), req.size());
+      chappe::build_frame(chappe::MSG_KV_GET, "state/mode", pl.data(), pl.size());
+  chappe::write_full(fd, req.data(), req.size());
 
   // Wait for the reply before setting anything. These are separate connections,
   // so the daemon is free to apply the set below before it ever registers this
   // watch — in which case the update we are counting would never be sent.
-  ipc::FrameReader reader(fd);
-  ipc::Frame f;
+  chappe::FrameReader reader(fd);
+  chappe::Frame f;
   ASSERT_TRUE(reader.next(f));
-  ASSERT_EQ((int)f.kind, (int)ipc::MSG_KV_REPLY);
+  ASSERT_EQ((int)f.kind, (int)chappe::MSG_KV_REPLY);
 
   a.set<std::string>("state/mode", "race");
 
   int updates = 0;
   auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
   while (std::chrono::steady_clock::now() < deadline && reader.next(f))
-    if (f.kind == ipc::MSG_KV_UPDATE)
+    if (f.kind == chappe::MSG_KV_UPDATE)
       updates++;
   ::close(fd);
 
@@ -178,7 +180,7 @@ void test_link_kv_does_not_ping_pong() {
 // link's startup get is answered with the current value.
 void test_link_seeds_existing_key() {
   auto pa = sock_path("seeda"), pb = sock_path("seedb");
-  ipc::BrokerServer da(pa), db(pb);
+  chappe::Server da(pa), db(pb);
   Node a("a");
   a.connect(pa);
   a.set<std::string>("state/mode", "preset");
@@ -186,8 +188,8 @@ void test_link_seeds_existing_key() {
 
   int sv[2];
   ::socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
-  ipc::BrokerLink::Config ca{pa, {}, {"state/mode"}}, cb{pb, {}, {"state/mode"}};
-  ipc::BrokerLink la(ca, sv[0]), lb(cb, sv[1]);
+  chappe::Link::Config ca{pa, {}, {"state/mode"}}, cb{pb, {}, {"state/mode"}};
+  chappe::Link la(ca, sv[0]), lb(cb, sv[1]);
 
   Node b("b");
   b.connect(pb);

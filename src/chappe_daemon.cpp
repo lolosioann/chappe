@@ -1,13 +1,13 @@
-// src/broker_daemon.cpp — the broker daemon process.
-// Usage: broker_daemon [socket-path]   (default /tmp/broker.sock)
-#include "broker_server.hpp"
+// src/chappe_daemon.cpp — the broker daemon process.
+// Usage: chappe_daemon [socket-path]   (default /tmp/chappe.sock)
+#include "server.hpp"
 #include <csignal>
 #include <iostream>
 #include <pthread.h>
 #include <string>
 
 int main(int argc, char **argv) {
-  std::string path = (argc > 1) ? argv[1] : ipc::default_broker_addr();
+  std::string path = (argc > 1) ? argv[1] : chappe::default_addr();
 
   // Block SIGINT/SIGTERM here so accept/reader threads inherit the mask and the
   // signal is delivered to sigwait below for a clean shutdown.
@@ -18,7 +18,7 @@ int main(int argc, char **argv) {
   pthread_sigmask(SIG_BLOCK, &set, nullptr);
 
   try {
-    ipc::BrokerServer server(path);
+    chappe::Server server(path);
     std::cout << "broker listening on " << path << " (SIGINT to stop)\n";
     int sig = 0;
     sigwait(&set, &sig);

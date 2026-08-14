@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Python frame-transport demo. Build the ring lib and start a daemon first:
     make daemon libshm_ring
-    ./bin/broker_daemon
+    ./bin/chappe_daemon
 Then:  python3 python/example_frames.py
 
 A camera node publishes frames into shared memory; a vision node reads them
@@ -9,7 +9,7 @@ zero-copy. Only the FrameHandle metadata crosses the broker.
 """
 import time
 
-from broker import Node
+from chappe import Node
 
 W, H = 8, 8  # tiny 8x8 grayscale frames
 

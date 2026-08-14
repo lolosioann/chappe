@@ -2,7 +2,7 @@
 """Mirror a broker bus into Redis, so a monitoring app that speaks Redis can see
 the system's state and publish into it.
 
-    nodes <--unix--> broker_daemon <--unix--> redis_bridge <--tcp--> redis <--> monitor
+    nodes <--unix--> chappe_daemon <--unix--> redis_bridge <--tcp--> redis <--> monitor
 
 What crosses, and why:
 
@@ -33,7 +33,7 @@ from collections import Counter
 from fnmatch import fnmatchcase
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from broker import Node, default_broker_addr
+from chappe import Node, default_addr
 
 try:
     import redis
@@ -139,11 +139,11 @@ class Bridge:
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("--socket", default=default_broker_addr())
+    p.add_argument("--socket", default=default_addr())
     p.add_argument("--redis-host", default="127.0.0.1")
     p.add_argument("--redis-port", type=int, default=6379)
     p.add_argument("--redis-db", type=int, default=0)
-    p.add_argument("--prefix", default="broker:",
+    p.add_argument("--prefix", default="chappe:",
                    help="namespace for mirrored keys and channels in Redis")
     p.add_argument("--key", action="append", default=[],
                    help="kv key mirrored out to Redis (repeatable)")

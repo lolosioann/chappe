@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Python client demo. Start the daemon first:  ./bin/broker_daemon
+"""Python client demo. Start the daemon first:  ./bin/chappe_daemon
 
 Shows pub/sub and get/set from Python. The "tick" payload is packed the same way
 the C++ side encodes `struct Tick { int seq; }`, so this also interoperates with
@@ -8,7 +8,7 @@ the C++ examples: run ./bin/producer and this consumer will decode its ticks.
 import struct
 import time
 
-from broker import Node
+from chappe import Node
 
 
 def main():

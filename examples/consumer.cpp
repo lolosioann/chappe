@@ -1,5 +1,5 @@
 // examples/consumer.cpp
-// Cross-process pub/sub, subscriber side. Start the daemon (./bin/broker_daemon),
+// Cross-process pub/sub, subscriber side. Start the daemon (./bin/chappe_daemon),
 // run this, then run ./bin/producer in another terminal.
 //   ./bin/consumer [broker-socket]     (defaults to the well-known address)
 #include "node.hpp"
@@ -11,9 +11,9 @@
 
 int main(int argc, char **argv) {
   std::cout << std::unitbuf; // flush each line: this process is Ctrl-C'd, never exits cleanly
-  std::string addr = (argc > 1) ? std::string(argv[1]) : ipc::default_broker_addr();
+  std::string addr = (argc > 1) ? std::string(argv[1]) : chappe::default_addr();
 
-  Node consumer("consumer");
+  chappe::Node consumer("consumer");
   consumer.connect(addr);
 
   consumer.subscribe([](const Tick &t) {
