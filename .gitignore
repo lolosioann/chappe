@@ -1,2 +1,8 @@
 bin/
 __pycache__/
+
+# python packaging artifacts
+build/
+dist/
+*.egg-info/
+*.so

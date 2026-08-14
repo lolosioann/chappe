@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chappe"
+dynamic = ["version"]
+description = "Typed same-host IPC message bus: pub/sub, key/value, zero-copy shared-memory frames"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.8"
+authors = [{ name = "lolosioann", email = "lolosioann@gmail.com" }]
+keywords = ["ipc", "message-bus", "pubsub", "shared-memory", "robotics"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  # POSIX shared memory and SO_PEERCRED — not portable off Linux.
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: C",
+  "Topic :: System :: Networking",
+]
+
+# The client itself is stdlib-only; Redis is needed just for the bridge.
+[project.optional-dependencies]
+redis = ["redis"]
+
+[project.scripts]
+chappe-redis-bridge = "chappe.redis_bridge:main"
+
+[project.urls]
+Homepage = "https://github.com/lolosioann/chappe"
+Changelog = "https://github.com/lolosioann/chappe/blob/main/CHANGELOG.md"
+
+[tool.setuptools]
+package-dir = { "" = "python" }
+
+[tool.setuptools.packages.find]
+where = ["python"]
+include = ["chappe*"]
+
+# Read statically out of python/chappe/__init__.py, so there is still exactly one
+# version literal per language (see chappe::VERSION and the Makefile's VERSION).
+[tool.setuptools.dynamic]
+version = { attr = "chappe.__version__" }

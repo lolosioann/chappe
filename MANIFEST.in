@@ -1,0 +1,5 @@
+# An sdist has to be able to rebuild the ring, so it needs the C source and its
+# header. setuptools picks up the Extension's own sources, but not the header.
+include include/shm_ring.h
+include LICENSE
+include CHANGELOG.md
