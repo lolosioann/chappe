@@ -61,13 +61,15 @@ intact.
       overrides it for links carrying only strings and bytes, which survive a
       mismatch. Serializing explicitly is still the answer for genuinely mixed
       fleets — this only stops you from corrupting data without noticing.
-- [ ] **Frames across devices** — a separate feature, not a link setting.
-      Forwarding pixels over TCP defeats the zero-copy design, so decide what it
-      should actually be before building it. Until then, note the sharp edge: a
-      forwarded FrameHandle points the far side at a segment that is missing, or
-      at a *different* local ring of the same name. The link cannot detect a
-      frame topic — on the wire a handle is just bytes — so this is a
-      configuration hazard the docs warn about rather than something it blocks.
+- [x] **Frames across devices** — done as `chappe.gst_bridge`, a separate
+      process rather than a link setting, because the answer was never to
+      forward the handle. It carries the topic as H.264 over RTP and terminates
+      it on each device: encode from the local ring, decode into a ring on the
+      far side, so each device keeps a normal local frame topic and its
+      zero-copy path. Explicitly not the zero-copy path across the wire — lossy
+      and higher latency, which suits an operator view and not remote vision
+      work. The link still refuses to forward frame topics, and the docs now
+      point here instead.
 
 ## Routing features
 

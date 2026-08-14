@@ -33,6 +33,18 @@ jobs:
       - name: Redis bridge self-check
         run: python3 python/test_bridge.py
 
+      # Same reasoning as Redis: the check skips itself without these, and a
+      # step that always skips covers nothing. libav carries avdec_h264 and
+      # ugly carries x264enc.
+      - name: Install GStreamer for the frame bridge check
+        run: |
+          sudo apt-get install -y -qq python3-gi gir1.2-gst-plugins-base-1.0 \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav
+
+      - name: GStreamer frame bridge self-check
+        run: python3 python/test_gst_bridge.py
+
   # Packaging is checked on every push, not just on a tag — a release should
   # never be the first time these are built.
   packaging:

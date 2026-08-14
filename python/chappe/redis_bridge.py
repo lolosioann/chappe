@@ -32,7 +32,8 @@ import time
 from collections import Counter
 from fnmatch import fnmatchcase
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Lets this run as a plain script as well as `python3 -m chappe.redis_bridge`.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from chappe import Node, default_addr
 
 try:

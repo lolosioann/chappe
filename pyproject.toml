@@ -28,6 +28,10 @@ redis = ["redis"]
 
 [project.scripts]
 chappe-redis-bridge = "chappe.redis_bridge:main"
+# No extra for this one: GStreamer and its plugins are system packages, so a
+# `chappe[gstreamer]` that only pulled PyGObject would install something that
+# still cannot encode anything.
+chappe-gst-bridge = "chappe.gst_bridge:main"
 
 [project.urls]
 Homepage = "https://github.com/lolosioann/chappe"

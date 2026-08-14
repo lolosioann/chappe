@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+### Frames across devices, as video
+
+`chappe.gst_bridge` carries a frame topic between devices as H.264 over RTP. It
+is a separate process built on the existing Python client, so the daemon gains
+no dependency and no code — the same shape as the Redis bridge.
+
+The point is what it *doesn't* do: it never forwards a `FrameHandle`. A handle
+names shared memory on the host that published it, so relaying one only points
+the far side at a segment that is missing, or at a different local ring with the
+same name. The bridge terminates the frame topic on each device instead —
+encode from the local ring, decode into a ring the far side owns — so nodes on
+both devices see an ordinary local frame topic and the zero-copy path inside
+each device is untouched. `chappe_link` still refuses frame topics; the docs now
+point here.
+
+This is deliberately not the zero-copy path across the wire: H.264 is lossy and
+encode/network/decode costs latency. It suits an operator view or a monitoring
+app, not a far side that needs real sensor bytes.
+
+Two things it refuses rather than fudges. `FrameHandle` carries no pixel format,
+so `--format` is configured and both ends must agree. And GStreamer pads rows to
+4 bytes where a ring is flat, so a width whose rows aren't a multiple of 4 is
+rejected at startup — left alone that combination doesn't error, it just
+forwards nothing, which is a far worse way to learn about it. `--pipeline`
+replaces the codec/transport half for anything else; the ring end stays ours.
+
+Needs GStreamer and PyGObject, which are system packages — so there is no
+`chappe[gstreamer]` extra, which would install something that still couldn't
+encode. `chappe-gst-bridge` is on PATH after a pip install; the self-check skips
+cleanly when the plugins are absent, and CI installs them so it doesn't.
+
 ### Links refuse a peer with a different ABI — breaking between link versions
 
 `wire_codec<T>` puts a struct's raw bytes on the wire. Same host, that is free.

@@ -393,8 +393,43 @@ keeps its unix socket and its `SO_PEERCRED` uid gate.
   host that published it. Forwarding one points the far side at a segment that
   is missing — or worse, at a *different* ring that happens to share the topic
   name. The link cannot detect this for you: on the wire a handle is just bytes.
+  Use the frame bridge below, which moves the pixels instead.
 - **A dropped link exits** with a non-zero status rather than reconnecting, so a
   supervisor restarts it. Same posture as the Redis bridge.
+
+## Frames across devices
+
+`chappe.gst_bridge` carries a frame topic between devices as H.264 video, since
+the handle itself is meaningless off-host. It terminates the frame topic on each
+side: the sender attaches to the local ring and encodes, the receiver decodes and
+publishes into a ring of its own, so nodes on either device just see an ordinary
+local frame topic and the zero-copy path inside each device is untouched.
+
+```sh
+# device A, where the camera publishes
+python3 -m chappe.gst_bridge --send cam/front --host b.local --port 5000 \
+                             --width 640 --height 480
+# device B
+python3 -m chappe.gst_bridge --recv cam/front --port 5000 \
+                             --width 640 --height 480
+```
+
+- **This is not the zero-copy path.** H.264 is lossy and encode/network/decode
+  adds latency. Right for an operator view or a monitoring app; wrong if the far
+  side needs the real sensor bytes to compute on.
+- **Both ends must agree on geometry and format.** `FrameHandle` carries only
+  timestamp, width, height and stride — no pixel format — so `--format` is
+  configured here (`GRAY8` by default).
+- **Rows must be a multiple of 4 bytes**, because GStreamer pads to that and a
+  chappe ring is flat. The bridge refuses at startup rather than starting up and
+  silently forwarding nothing, which is what a mismatch actually does.
+- **Bring your own pipeline** with `--pipeline` to change codec or transport;
+  the ring end stays ours. The default is H.264 over RTP/UDP with
+  `tune=zerolatency`, dropping frames rather than lagging.
+- Needs GStreamer and PyGObject, which are system packages rather than pip
+  installs — Debian/Ubuntu `python3-gi gstreamer1.0-plugins-{base,good,bad,ugly}
+  gstreamer1.0-libav`, Arch `python-gobject gst-plugins-{base,good,bad,ugly}
+  gst-libav`.
 
 ## Benchmarks
 
