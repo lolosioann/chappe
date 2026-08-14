@@ -96,6 +96,23 @@ jobs:
           cmake -S /tmp/c -B /tmp/c/build -DCMAKE_PREFIX_PATH=/tmp/p
           cmake --build /tmp/c/build
 
+      # The documented invocation is `| sh`, and /bin/sh here is dash — stricter
+      # than the shell it was written under, which is the point of running it.
+      # It installs the latest *release*, so this also checks the published
+      # tarball still builds.
+      - name: Installer runs under /bin/sh
+        run: |
+          mkdir -p /tmp/units
+          PREFIX=/tmp/ip SYSTEMD_DIR=/tmp/units sh scripts/install.sh
+          test -x /tmp/ip/bin/chappe_daemon
+          test -x /tmp/ip/bin/chappe_link
+          test -f /tmp/ip/lib/pkgconfig/chappe.pc
+          test -f /tmp/ip/lib/cmake/chappe/chappeConfig.cmake
+          test -f /tmp/units/chappe.service
+          systemd-analyze verify /tmp/units/chappe.service
+          /tmp/ip/bin/chappe_daemon /tmp/ci.sock &
+          sleep 1 && test -S /tmp/ci.sock && kill %1
+
       - uses: actions/upload-artifact@v5
         with:
           name: dist

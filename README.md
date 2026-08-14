@@ -31,14 +31,43 @@ Requires a C++17 compiler and `-lrt` (POSIX shm).
 ## Install
 
 ```sh
+curl -sSL https://raw.githubusercontent.com/lolosioann/chappe/main/scripts/install.sh | sh
+```
+
+Builds the latest release and installs the `chappe_daemon` and `chappe_link`
+binaries, `libshm_ring.so`, the C++ headers under `include/chappe/`, a
+pkg-config file and a CMake package config — then registers a systemd unit so
+the daemon comes up at boot. Needs `curl`, `tar`, `make` and a C++17 compiler.
+
+```sh
+PREFIX=~/.local  ...| sh        # somewhere else (no sudo needed)
+CHAPPE_REF=v3.0.0 ...| sh       # pin a version instead of the latest release
+CHAPPE_USER=robot ...| sh       # uid the daemon runs as (see below)
+CHAPPE_SOCKET=/run/chappe.sock ...| sh
+...| sh -s -- --no-systemd      # binaries only, register nothing
+```
+
+**Which user the daemon runs as matters.** The socket is `0600` and every
+connection is checked with `SO_PEERCRED`, so nodes have to run as the same uid.
+The script defaults to whoever invoked it (`$SUDO_USER` under sudo), not root —
+a daemon running as root that nobody can talk to is the easy mistake here. The
+unit also sets `PrivateTmp=no` deliberately: with a private `/tmp` the daemon
+would create its socket in a namespace no client can see.
+
+```sh
+systemctl status chappe        # it is a normal unit
+journalctl -u chappe -f
+```
+
+Or build it yourself:
+
+```sh
 sudo make install                 # -> /usr/local (PREFIX to override)
 make install PREFIX=~/.local      # or a user prefix, no sudo
 make uninstall                    # same PREFIX/DESTDIR removes it
 ```
 
-Installs the `chappe_daemon` and `chappe_link` binaries, `libshm_ring.so`, the
-C++ headers under `include/chappe/`, a pkg-config file, a CMake package config,
-and the Python package. `DESTDIR` is supported for staged/distro packaging.
+`DESTDIR` is supported for staged/distro packaging.
 
 ### Using it from C++
 
@@ -58,19 +87,17 @@ If you installed to a non-standard prefix, point the tools at it with
 
 ### Using it from Python
 
-Not on PyPI — install from a checkout, from the repo, or from a release:
+Not on PyPI, but the repo is public, so pip can fetch it directly:
 
 ```sh
-pip install .                                              # from a clone
-pip install "git+ssh://git@github.com/lolosioann/chappe.git@v3.0.0"
-gh release download v3.0.0 --pattern '*.tar.gz' \
-  && pip install chappe-3.0.0.tar.gz                       # from a release
-pip install '.[redis]'                                     # extra for the Redis bridge
+pip install https://github.com/lolosioann/chappe/releases/download/v3.0.0/chappe-3.0.0.tar.gz
+pip install "git+https://github.com/lolosioann/chappe.git@v3.0.0"   # or a tag/branch
+pip install .                                                       # from a clone
+pip install '.[redis]'                                              # extra for the Redis bridge
 ```
 
-The repo is private, so a plain `https://` download of a release asset 404s —
-use `gh release download` (or an authenticated URL), and `git+ssh` rather than
-`git+https` unless you have a token.
+The Python client is standalone — it speaks the wire protocol itself, so it
+needs no `make` and none of the C++ install. It does need a daemon to talk to.
 
 Installing builds `src/shm_ring.c` into the package, so frames work off pip
 alone — no `make` step and no `$CHAPPE_LIB`. **Prefer the sdist:** releases also

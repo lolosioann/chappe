@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### One-line install, and a systemd unit
+
+```sh
+curl -sSL https://raw.githubusercontent.com/lolosioann/chappe/main/scripts/install.sh | sh
+```
+
+`scripts/install.sh` resolves the latest release, builds it, installs the
+binaries and the whole C++ side, and registers a systemd unit so the daemon
+comes up at boot. `PREFIX`, `CHAPPE_REF`, `CHAPPE_USER` and `CHAPPE_SOCKET`
+override the defaults; `--no-systemd` installs the binaries and registers
+nothing. sudo is used only when the prefix actually needs it.
+
+Two details in the unit that are easy to get wrong and expensive to debug:
+
+- **`User=` defaults to whoever ran the script** (`$SUDO_USER` under sudo), not
+  root. The socket is `0600` and gated on `SO_PEERCRED`, so a daemon running as
+  root is one no ordinary node can talk to.
+- **`PrivateTmp=no`**, explicitly. A private `/tmp` would put the daemon's
+  socket in a namespace no client can see, and the socket is the entire
+  interface.
+
+The Python client stays on pip and is not touched by the script.
+
 ### Python publish/set take values, not just bytes
 
 `publish("number", 17)` used to fail with "object of type 'int' has no len()".
