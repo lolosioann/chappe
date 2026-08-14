@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+### Links refuse a peer with a different ABI — breaking between link versions
+
+`wire_codec<T>` puts a struct's raw bytes on the wire. Same host, that is free.
+Between two devices it is an assumption about byte order, padding, type sizes
+and char signedness — and when it is wrong nothing fails: the bytes arrive, the
+length matches, and they decode into plausible garbage. A control system acting
+on quietly wrong numbers is worse than one with a dead link.
+
+So a link now opens by sending an `abi_fingerprint()` — byte order read from a
+known value rather than a macro, `sizeof` of pointer/long/long double, the
+padding of a probe struct, and whether `char` is signed (the x86-vs-ARM trap:
+same bytes, different values). It describes the *ABI*, not the build; matching
+compiler versions are neither necessary nor sufficient.
+
+The hello is the first frame on the wire and the peer checks it before its loop
+body, so there is no window in which an incompatible peer's data reaches the
+daemon. A peer that opens with anything else is refused the same way, which is
+also what an older link looks like. `--allow-abi-mismatch` overrides it for
+links carrying only strings and bytes, which survive the difference.
+
+Breaking for links specifically: a 2.0.0 link never sends a hello, so a link at
+this version will refuse it. Upgrade both ends of a link together. Nothing about
+the client/daemon protocol changed — this frame only ever travels link-to-link,
+which is why it sits at kind 200, clear of the `MSG_` range.
+
+`Link::error()` now reports why a link stopped, and `chappe_link` prints it
+instead of a bare "peer link lost".
+
 ## v2.0.0
 
 Major because the rename below breaks every include, import and environment

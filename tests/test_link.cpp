@@ -233,6 +233,71 @@ void test_link_ignores_unlisted_key() {
   ASSERT_TRUE(!b.get<std::string>("state/secret").has_value());
 }
 
+// Stand in for a peer link: write its opening frame by hand, then whatever
+// else we want it to try to push across.
+static int fake_peer(uint64_t fingerprint, uint8_t kind = Link::MSG_LINK_HELLO) {
+  int sv[2];
+  ::socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+  char fp[sizeof(fingerprint)];
+  std::memcpy(fp, &fingerprint, sizeof(fingerprint));
+  auto hello = build_frame(kind, "9.9.9", fp, sizeof(fp));
+  write_full(sv[1], hello.data(), hello.size());
+  // A set the peer wants applied. It must not land: the handshake is the first
+  // frame on the wire, so this is already behind a verdict.
+  auto set = build_frame(MSG_KV_SET, "state/mode", "leaked", 6);
+  write_full(sv[1], set.data(), set.size());
+  return sv[0]; // sv[1] stays open so the link sees data, not EOF
+}
+
+// A peer built for a different ABI is refused. wire_codec ships raw struct
+// bytes, so a layout or byte-order difference doesn't fail — it decodes into
+// plausible garbage, which is worse than a dead link.
+void test_link_refuses_abi_mismatch() {
+  auto pa = sock_path("abi");
+  chappe::Server da(pa);
+  Link::Config c{pa, {}, {"state/mode"}};
+  Link l(c, fake_peer(abi_fingerprint() ^ 0x9e3779b9u));
+
+  ASSERT_TRUE(wait_until([&] { return !l.alive(); }));
+  ASSERT_TRUE(l.error().find("ABI differs") != std::string::npos);
+
+  Node probe("probe");
+  probe.connect(pa);
+  ASSERT_TRUE(!probe.get<std::string>("state/mode").has_value());
+}
+
+// Same refusal when the peer opens with anything other than a handshake —
+// something that isn't a link at all, or a link too old to send one.
+void test_link_refuses_peer_without_handshake() {
+  auto pa = sock_path("nohello");
+  chappe::Server da(pa);
+  Link::Config c{pa, {}, {"state/mode"}};
+  Link l(c, fake_peer(abi_fingerprint(), MSG_KV_SET));
+
+  ASSERT_TRUE(wait_until([&] { return !l.alive(); }));
+  ASSERT_TRUE(l.error().find("handshake") != std::string::npos);
+
+  Node probe("probe");
+  probe.connect(pa);
+  ASSERT_TRUE(!probe.get<std::string>("state/mode").has_value());
+}
+
+// The escape hatch, for links carrying only strings and bytes: the mismatch is
+// tolerated and traffic flows.
+void test_link_allows_abi_mismatch_when_asked() {
+  auto pa = sock_path("abiok");
+  chappe::Server da(pa);
+  Link::Config c{pa, {}, {"state/mode"}, /*allow_abi_mismatch=*/true};
+  Link l(c, fake_peer(abi_fingerprint() ^ 0x9e3779b9u));
+
+  Node probe("probe");
+  probe.connect(pa);
+  ASSERT_TRUE(wait_until([&] {
+    return probe.get<std::string>("state/mode").value_or("") == "leaked";
+  }));
+  ASSERT_TRUE(l.alive());
+}
+
 int main() {
   test_case("a publish crosses the link both ways", test_link_forwards_publish);
   test_case("an unlisted topic stays on its device",
@@ -245,5 +310,11 @@ int main() {
   test_case("a kv delete crosses the link", test_link_forwards_delete);
   test_case("an unlisted key stays on its device",
             test_link_ignores_unlisted_key);
+  test_case("a peer with a different abi is refused",
+            test_link_refuses_abi_mismatch);
+  test_case("a peer that skips the handshake is refused",
+            test_link_refuses_peer_without_handshake);
+  test_case("an abi mismatch can be allowed on purpose",
+            test_link_allows_abi_mismatch_when_asked);
   return test_summary();
 }

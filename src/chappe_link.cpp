@@ -21,6 +21,10 @@ static void usage(const char *me) {
          "(repeatable)\n"
       << "  --key NAME        kv key forwarded both ways, exact name "
          "(repeatable)\n"
+      << "  --allow-abi-mismatch  link to a peer whose ABI differs. Only safe\n"
+         "                    if everything forwarded is strings or bytes: a\n"
+         "                    struct sent through the default codec is raw\n"
+         "                    layout, and would decode into garbage.\n"
       << "\nDon't list a frame topic: a FrameHandle names shared memory on the\n"
          "host that published it, so forwarding one points the far side at a\n"
          "segment that is missing, or worse, a different ring of the same "
@@ -53,6 +57,8 @@ int main(int argc, char **argv) {
       listen_addr = argv[++i];
     else if (a == "--peer" && has_next)
       peer_addr = argv[++i];
+    else if (a == "--allow-abi-mismatch")
+      cfg.allow_abi_mismatch = true;
     else {
       usage(argv[0]);
       return 2;
@@ -116,7 +122,7 @@ int main(int argc, char **argv) {
         return 0;
       }
     }
-    std::cerr << "peer link lost\n";
+    std::cerr << (link.error().empty() ? "peer link lost" : link.error()) << "\n";
   } catch (const std::exception &e) {
     std::cerr << "link error: " << e.what() << "\n";
     return 1;

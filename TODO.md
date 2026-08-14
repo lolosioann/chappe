@@ -50,10 +50,17 @@ intact.
       is no `SO_PEERCRED` equivalent and a plaintext token would look like
       security without being it, so `tcp_listen` requires an explicit bind
       address and the docs say to run links over WireGuard/SSH/a private VLAN.
-- [ ] **Payload portability.** Bigger than the endianness note it replaces:
-      `wire_codec<T>` ships raw struct bytes, so layout, padding *and* byte order
-      are all assumed identical across the link. Fine between identical builds;
-      document it, and serialize explicitly for anything else.
+- [x] **Payload portability.** Done, by making the assumption fail loudly
+      instead of silently. `wire_codec<T>` ships raw struct bytes, so layout,
+      padding, byte order and char signedness all have to match; when they don't
+      the bytes still arrive and still decode, into plausible garbage. So links
+      now open with an `abi_fingerprint()` (byte order, pointer/long/long-double
+      sizes, the padding of a probe struct, char signedness) and refuse a peer
+      that disagrees. It describes the *ABI*, not the build: matching compiler
+      versions are neither necessary nor sufficient. `--allow-abi-mismatch`
+      overrides it for links carrying only strings and bytes, which survive a
+      mismatch. Serializing explicitly is still the answer for genuinely mixed
+      fleets — this only stops you from corrupting data without noticing.
 - [ ] **Frames across devices** — a separate feature, not a link setting.
       Forwarding pixels over TCP defeats the zero-copy design, so decide what it
       should actually be before building it. Until then, note the sharp edge: a

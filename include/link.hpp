@@ -1,4 +1,5 @@
 #pragma once
+#include "chappe.hpp"
 #include "ipc/transport.hpp"
 #include <atomic>
 #include <map>
@@ -28,17 +29,37 @@ namespace chappe {
 // SSH, a VLAN); the address tcp_listen binds is the whole access-control story.
 class Link {
 public:
+  // Link-to-link only. It never reaches a daemon, so it sits well clear of the
+  // MSG_ range the client protocol uses rather than extending that enum.
+  static constexpr uint8_t MSG_LINK_HELLO = 200;
+
   struct Config {
     std::string socket = default_addr();
     std::vector<std::string> topics; // wildcard patterns, forwarded both ways
     std::vector<std::string> keys;   // exact key names, forwarded both ways
+    // Carry on despite a peer whose ABI differs. Only safe when every forwarded
+    // payload is self-describing — strings and raw bytes survive a layout or
+    // byte-order difference; a struct going through the default wire_codec
+    // does not.
+    bool allow_abi_mismatch = false;
   };
 
   // `peer_fd` is an already-connected socket to the peer link — whoever built
   // it decided listen-vs-connect, which keeps that policy out of here and lets
-  // a test hand over a socketpair.
+  // a test hand over a socketpair. Ownership transfers only on success: if this
+  // throws, the caller still owns the fd.
   Link(Config cfg, int peer_fd)
       : cfg_(std::move(cfg)), peer_fd_(peer_fd) {
+    // Sent before anything else, so it is the first frame on the wire and the
+    // peer can vet us before a single data frame reaches its daemon. Read the
+    // reply in peer_loop rather than blocking here: both ends run this same
+    // constructor, and two links waiting for each other would never start.
+    uint64_t mine = abi_fingerprint();
+    char fp[sizeof(mine)];
+    std::memcpy(fp, &mine, sizeof(mine));
+    if (!send_frame(peer_fd_, MSG_LINK_HELLO, VERSION, fp, sizeof(fp)))
+      throw std::runtime_error("link: peer hung up before the handshake");
+
     local_fd_ = unix_connect(cfg_.socket);
     if (local_fd_ < 0)
       throw std::runtime_error("link: cannot reach broker at " + cfg_.socket);
@@ -76,7 +97,14 @@ public:
   // the process exits and a supervisor restarts it, like the Redis bridge.
   bool alive() const { return running_.load(); }
 
+  // Why the link stopped, empty if it just lost its peer. Safe to read once
+  // alive() is false: it is written before the store that clears running_, so
+  // that store/load pair orders it.
+  const std::string &error() const { return error_; }
+
 private:
+  void fail(std::string why) { error_ = std::move(why); }
+
   static bool send_frame(int fd, uint8_t kind, const std::string &name,
                          const char *payload, size_t n) {
     auto buf = build_frame(kind, name, payload, n);
@@ -163,9 +191,35 @@ private:
     ::shutdown(peer_fd_, SHUT_RDWR); // unblock the other loop
   }
 
+  // The peer's hello must be the very first frame it sends, so checking it
+  // before the loop body means nothing from an incompatible peer is ever
+  // applied — there is no window to race.
+  bool peer_accepted(const Frame &f) {
+    if (f.kind != MSG_LINK_HELLO || f.payload.size() != sizeof(uint64_t)) {
+      fail("peer did not open with a handshake — is it a chappe_link?");
+      return false;
+    }
+    uint64_t theirs;
+    std::memcpy(&theirs, f.payload.data(), sizeof(theirs));
+    if (theirs == abi_fingerprint())
+      return true;
+    if (cfg_.allow_abi_mismatch)
+      return true;
+    fail("peer ABI differs (peer runs chappe " + f.name +
+         "). Raw struct payloads would decode into garbage across this link: "
+         "rebuild both ends for the same ABI, or pass --allow-abi-mismatch if "
+         "everything forwarded is strings or bytes.");
+    return false;
+  }
+
   void peer_loop() {
     FrameReader reader(peer_fd_);
     Frame f;
+    if (!reader.next(f) || !peer_accepted(f)) {
+      running_.store(false);
+      ::shutdown(local_fd_, SHUT_RDWR);
+      return;
+    }
     while (running_.load() && reader.next(f)) {
       // Filtered on arrival too, not just on send: a peer configured with
       // patterns we don't share would otherwise inject topics this device never
@@ -209,6 +263,7 @@ private:
   Config cfg_;
   int peer_fd_;
   int local_fd_ = -1;
+  std::string error_;
   std::atomic<bool> running_{false};
   std::thread local_thread_, peer_thread_;
 

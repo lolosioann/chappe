@@ -24,7 +24,7 @@ CLIENT_DEPS := include/node.hpp include/chappe.hpp include/threadpool.hpp \
 # Daemon (Server) headers — no shm, sockets only.
 SERVER_DEPS := include/server.hpp include/ipc/transport.hpp include/chappe.hpp
 # Cross-device link — transport only, no client and no shm.
-LINK_DEPS   := include/link.hpp include/ipc/transport.hpp
+LINK_DEPS   := include/link.hpp include/ipc/transport.hpp include/chappe.hpp
 
 # ---- targets ---------------------------------------------------------------
 

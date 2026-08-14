@@ -375,6 +375,14 @@ keeps its unix socket and its `SO_PEERCRED` uid gate.
   token scheme here, because a plaintext token looks like security without being
   it. Put links on a private network — WireGuard, an SSH tunnel, a VLAN — and
   bind `--listen` to the interface you mean.
+- **Both ends must share an ABI.** The default codec puts a struct's raw bytes
+  on the wire, so if the two devices disagree about byte order, padding, type
+  sizes or whether `char` is signed, the bytes still arrive and still decode —
+  into plausible garbage. Links therefore open with an ABI fingerprint and
+  refuse a peer that disagrees, before any data is applied. Pass
+  `--allow-abi-mismatch` if everything you forward is strings or bytes, which
+  survive the difference; for genuinely mixed fleets, serialize explicitly
+  rather than relying on struct layout.
 - **Keys are exact names, topics may be wildcards.** Same reason as the Redis
   bridge: a client starts watching a key by getting it, so there is nothing to
   match a key pattern against.

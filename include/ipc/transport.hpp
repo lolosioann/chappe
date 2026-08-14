@@ -1,8 +1,10 @@
 #pragma once
 #include <cerrno>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -70,6 +72,46 @@ template <typename T> struct wire_codec<std::vector<T>> {
     return true;
   }
 };
+
+// ---- ABI fingerprint ------------------------------------------------------
+// The default wire_codec ships a struct's raw bytes, which assumes both ends
+// lay that struct out identically — same byte order, same padding, same
+// fundamental sizes, same char signedness. On one host that is free. Across a
+// link between two devices it is an assumption, and when it is wrong nothing
+// fails: the bytes arrive and decode into plausible garbage.
+//
+// So the link exchanges this fingerprint and refuses a peer that disagrees.
+// It deliberately describes the *ABI*, not the build: same compiler version is
+// neither necessary nor sufficient.
+struct AbiProbe { // padding here is what differs between ABIs
+  char a;
+  double b;
+  int c;
+  short d;
+};
+
+inline uint64_t abi_fingerprint() {
+  uint64_t h = 1469598103934665603ull; // FNV-1a
+  auto mix = [&h](uint64_t v) {
+    h ^= v;
+    h *= 1099511628211ull;
+  };
+  // Byte order read out of a known value rather than trusted from a macro.
+  uint32_t probe = 0x01020304;
+  unsigned char lowest;
+  std::memcpy(&lowest, &probe, 1);
+  mix(lowest);
+  mix(sizeof(void *));
+  mix(sizeof(long));
+  mix(sizeof(long double));
+  mix(sizeof(AbiProbe));
+  mix(offsetof(AbiProbe, b));
+  mix(offsetof(AbiProbe, c));
+  mix(offsetof(AbiProbe, d));
+  // Signed on x86, unsigned on stock ARM: same bytes, different values read.
+  mix(static_cast<uint64_t>(std::numeric_limits<char>::is_signed));
+  return h;
+}
 
 // ---- frame kinds ----------------------------------------------------------
 // The client<->daemon protocol. name/payload meaning is per-kind (see the
