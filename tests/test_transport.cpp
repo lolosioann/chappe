@@ -505,7 +505,33 @@ void test_tcp_connect_refused() {
   ASSERT_EQ(chappe::tcp_connect("127.0.0.1", port), -1);
 }
 
+// A C++ node can read what a Python node published: the payload is bytes like
+// any other, wearing an envelope json_payload() recognises. Byte-for-byte what
+// python/chappe/__init__.py produces — test_chappe.py holds the two magics
+// together, this holds the C++ half's behaviour.
+void test_json_payload() {
+  std::string serialized = std::string("\xc7" "ch\x01", 4) + R"({"gear": 3})";
+  auto body = chappe::json_payload(serialized);
+  ASSERT_TRUE(body.has_value());
+  ASSERT_EQ(std::string(*body), std::string(R"({"gear": 3})"));
+
+  // A raw payload is not one: a POD, a frame handle, or bytes sent as bytes.
+  int32_t pod = 42;
+  ASSERT_TRUE(!chappe::json_payload(reinterpret_cast<const char *>(&pod),
+                                    sizeof(pod)).has_value());
+  ASSERT_TRUE(!chappe::json_payload(std::string("plain")).has_value());
+
+  // Shorter than the magic must not read past the end.
+  ASSERT_TRUE(!chappe::json_payload(std::string("\xc7" "c", 2)).has_value());
+  // An empty body is still an envelope, not a miss.
+  auto empty = chappe::json_payload(std::string("\xc7" "ch\x01", 4));
+  ASSERT_TRUE(empty.has_value());
+  ASSERT_EQ(empty->size(), (size_t)0);
+}
+
 int main() {
+  test_case("json_payload finds a python value, ignores raw bytes",
+            test_json_payload);
   test_case("daemon carries pod/list/string/composite", test_transport_types);
   test_case("publish is not echoed to the publisher", test_transport_no_echo);
   test_case("daemon-backed get/set with read-through cache", test_kv_store);

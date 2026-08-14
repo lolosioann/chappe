@@ -15,10 +15,15 @@ magic is what makes decoding safe to do unconditionally — a C++ POD almost nev
 starts with those four bytes, and if one does, the JSON behind it fails to parse
 and the raw bytes are handed back untouched.
 
-The serialized form is **Python-to-Python**. A C++ subscriber sees opaque bytes,
-because `wire_codec<T>` is a compile-time POD mapping with nowhere to put a
-dict. Cross-language topics still want `struct.pack` matching the C++ type; that
-is unchanged and still the documented route.
+A C++ node can still read these. `wire_codec<T>` is a compile-time POD mapping
+with nowhere to put a dict, so it cannot decode one into a type — but the daemon
+never inspects a payload, so the bytes arrive intact. `chappe::json_payload()`
+(new, in `ipc/transport.hpp`) says whether a payload carries the envelope and
+hands back the JSON body as a `string_view`, to feed to whatever parser you
+already use; chappe does not ship one, and recognising an envelope is not
+parsing. It exists so callers stop hardcoding the magic and a `substr(4)`, which
+is how that silently breaks later. Cross-language topics are still better served
+by agreeing on a POD and having Python `struct.pack` it.
 
 JSON, not pickle, and deliberately: `chappe_link` forwards payloads between
 devices over TCP with no auth, so a pickle payload would be remote code

@@ -5,7 +5,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <vector>
 
@@ -72,6 +74,28 @@ template <typename T> struct wire_codec<std::vector<T>> {
     return true;
   }
 };
+
+// ---- the Python client's serialized values --------------------------------
+// python/chappe/__init__.py sends anything that isn't bytes as this 4-byte
+// magic followed by JSON. C++ has no JSON parser and is not acquiring one — but
+// recognising the envelope is not parsing, and hardcoding the magic at every
+// call site is how it silently breaks the day it changes. So: ask whether a
+// payload carries one, get the body, and hand that to whatever parser you
+// already use. test_chappe.py fails if the two sides' magic ever drift apart.
+inline constexpr char JSON_MAGIC[] = {'\xc7', 'c', 'h', '\x01'};
+
+// The JSON body if `data` is a serialized Python value, else nullopt — which
+// means an ordinary payload: a POD, a frame handle, or bytes sent as bytes.
+inline std::optional<std::string_view> json_payload(const char *data, size_t n) {
+  if (n < sizeof(JSON_MAGIC) ||
+      std::memcmp(data, JSON_MAGIC, sizeof(JSON_MAGIC)) != 0)
+    return std::nullopt;
+  return std::string_view(data + sizeof(JSON_MAGIC), n - sizeof(JSON_MAGIC));
+}
+
+inline std::optional<std::string_view> json_payload(const std::string &s) {
+  return json_payload(s.data(), s.size());
+}
 
 // ---- ABI fingerprint ------------------------------------------------------
 // The default wire_codec ships a struct's raw bytes, which assumes both ends

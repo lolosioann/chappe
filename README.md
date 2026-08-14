@@ -304,8 +304,9 @@ node.subscribe("tick", lambda p: print(struct.unpack("=i", p)[0]))
 node.publish("tick", struct.pack("=i", 42))
 ```
 
-- The serialized form is **Python-to-Python**: a C++ subscriber sees it as
-  opaque bytes, since `wire_codec<T>` is a compile-time POD mapping.
+- The serialized form is **Python-first**: `wire_codec<T>` is a compile-time POD
+  mapping, so a C++ node can't decode a dict into a type. It *can* read the
+  bytes and parse them — see below.
 - It is JSON, not pickle — a link forwards payloads between devices with no auth
   on the wire, and unpickling that would be remote code execution. So tuples
   come back as lists, dict keys come back as strings, and `bytes` cannot nest
@@ -316,6 +317,34 @@ node.publish("tick", struct.pack("=i", 42))
 - `incr` fixes its counter at a native-endian int64, so seed one with
   `set(k, struct.pack("=q", n))` — `set(k, n)` stores the serialized form and
   `incr` rejects it.
+
+### Reading Python values from C++
+
+The daemon never inspects a payload, so a C++ node receives one of these
+perfectly well — it just arrives as bytes wearing a small envelope.
+`json_payload()` recognises the envelope and hands you the body; parse it with
+whatever JSON library you already use (chappe doesn't ship one).
+
+```cpp
+// subscribe_pattern is the untyped door: topic + raw bytes, and a pattern with
+// no wildcard is just an exact topic.
+node.subscribe_pattern("telemetry", [](const std::string &topic,
+                                       const void *d, size_t len) {
+  if (auto json = chappe::json_payload(static_cast<const char *>(d), len))
+    my_parser(*json);            // std::string_view: {"speed": 3.4, "gear": 2}
+  else
+    /* an ordinary payload: a POD, a frame handle, or bytes sent as bytes */;
+});
+
+// kv works the same way — the std::string codec returns the stored bytes as-is.
+if (auto v = node.get<std::string>("mode"))
+  if (auto json = chappe::json_payload(*v))
+    my_parser(*json);
+```
+
+Going the other way, a C++ node that wants a Python node to receive a value
+would have to emit the same envelope; for cross-language topics it is simpler to
+agree on a POD and have Python `struct.pack` it.
 
 - **pub/sub and get/set** are pure stdlib — no build, no dependencies.
 - **Same surface as C++** — `unsubscribe`/`unsubscribe_pattern`,

@@ -448,6 +448,17 @@ def test_protocol_parity():
     for name, value in sorted(cpp.items()):
         assert getattr(chappe, "_" + name, None) == value, \
             f"MSG_{name}: C++ {value}, Python {getattr(chappe, '_' + name, None)}"
+
+    # The magic in front of a serialized value is a contract between the two
+    # clients: C++ strips it with json_payload(). Drift and a C++ node quietly
+    # stops recognising Python values.
+    with open(header) as f:
+        m = re.search(r"JSON_MAGIC\[\] = \{([^}]*)\}", f.read())
+    assert m, "JSON_MAGIC moved; update this check"
+    cpp_magic = bytes(int(c.strip().strip("'").replace("\\x", ""), 16)
+                      if "\\x" in c else ord(c.strip().strip("'"))
+                      for c in m.group(1).split(","))
+    assert cpp_magic == chappe._MAGIC, f"C++ {cpp_magic!r}, Python {chappe._MAGIC!r}"
     print("python protocol parity self-check OK")
 
 
