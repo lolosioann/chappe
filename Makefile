@@ -11,6 +11,8 @@ BINDIR   := bin
 #   $(PREFIX)/lib/chappe/python/*.py
 PREFIX ?= /usr/local
 DESTDIR ?=
+# Kept in step with chappe::VERSION and python's __version__ by test_chappe.py.
+VERSION := 2.0.0
 PUB_HEADERS := include/chappe.hpp include/node.hpp include/server.hpp \
                include/threadpool.hpp include/link.hpp include/shm_ring.h
 

@@ -451,6 +451,20 @@ def test_protocol_parity():
     print("python protocol parity self-check OK")
 
 
+def test_version_parity():
+    """The version is written out three times — chappe::VERSION, the Makefile's
+    VERSION (which stamps chappe.pc and the CMake config) and __version__. That
+    is fine as long as bumping one without the others can't go unnoticed."""
+    with open(os.path.join(ROOT, "include", "chappe.hpp")) as f:
+        cpp = re.search(r'VERSION = "([^"]+)"', f.read())
+    with open(os.path.join(ROOT, "Makefile")) as f:
+        mk = re.search(r"^VERSION := (\S+)", f.read(), re.M)
+    assert cpp and mk, "version literal moved; update this check"
+    assert cpp.group(1) == chappe.__version__ == mk.group(1), \
+        f"C++ {cpp.group(1)}, python {chappe.__version__}, make {mk.group(1)}"
+    print(f"python version parity self-check OK ({chappe.__version__})")
+
+
 if __name__ == "__main__":
     main()
     test_patterns()
@@ -464,3 +478,4 @@ if __name__ == "__main__":
     test_retained_clear()
     test_handler_pool()
     test_protocol_parity()
+    test_version_parity()

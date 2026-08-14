@@ -8,6 +8,12 @@
 
 namespace chappe {
 
+// The same literal lives in the Makefile (VERSION, for chappe.pc and the CMake
+// config) and in python/chappe/__init__.py (__version__). Three copies rather
+// than a generated header, because generating one would put a build step in
+// front of a header-only library; test_chappe.py fails if they drift apart.
+constexpr const char *VERSION = "2.0.0";
+
 // ---- Topic -----------------------------------------------------------------
 
 template <typename T> struct Topic {
