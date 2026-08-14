@@ -180,11 +180,7 @@ this needs.
 
 ## Housekeeping
 
-- [x] LICENSE (MIT) + CHANGELOG for v1.0.0. Tag `v1.0.0` on the release commit.
-- [x] **v2.0.0 released.** Tagged on the rename/packaging commit; the `release`
-      workflow checked the tag against the version in the tree and attached the
-      sdist and wheel. Repo renamed to `chappe` — the old URL still redirects,
-      but `git remote set-url` is worth doing on each existing clone.
-- [x] **v3.0.0 released.** The link ABI handshake and the GStreamer frame
-      bridge. Major because a v2 link and a v3 link won't handshake, so both
-      ends of a link upgrade together; everything else is a rebuild.
+- [x] LICENSE (MIT), and a CHANGELOG describing 1.0.0 as one release rather than
+      a history of renames — the earlier v1/v2/v3 tags were deleted before the
+      repo was public, so nobody can have installed them.
+- [ ] Tag `v1.0.0` and let the `release` workflow publish it.

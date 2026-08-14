@@ -41,7 +41,7 @@ the daemon comes up at boot. Needs `curl`, `tar`, `make` and a C++17 compiler.
 
 ```sh
 PREFIX=~/.local  ...| sh        # somewhere else (no sudo needed)
-CHAPPE_REF=v3.0.0 ...| sh       # pin a version instead of the latest release
+CHAPPE_REF=v1.0.0 ...| sh       # pin a version instead of the latest release
 CHAPPE_USER=robot ...| sh       # uid the daemon runs as (see below)
 CHAPPE_SOCKET=/run/chappe.sock ...| sh
 ...| sh -s -- --no-systemd      # binaries only, register nothing
@@ -78,7 +78,7 @@ g++ -std=c++17 app.cpp $(pkg-config --cflags --libs chappe) -o app
 ```
 
 ```cmake
-find_package(chappe 3.0 REQUIRED)
+find_package(chappe 1.0 REQUIRED)
 target_link_libraries(myapp PRIVATE chappe::chappe)   # headers, shm ring, pthread, rt
 ```
 
@@ -90,8 +90,8 @@ If you installed to a non-standard prefix, point the tools at it with
 Not on PyPI, but the repo is public, so pip can fetch it directly:
 
 ```sh
-pip install https://github.com/lolosioann/chappe/releases/download/v3.0.0/chappe-3.0.0.tar.gz
-pip install "git+https://github.com/lolosioann/chappe.git@v3.0.0"   # or a tag/branch
+pip install https://github.com/lolosioann/chappe/releases/download/v1.0.0/chappe-1.0.0.tar.gz
+pip install "git+https://github.com/lolosioann/chappe.git@v1.0.0"   # or a tag/branch
 pip install .                                                       # from a clone
 pip install '.[redis]'                                              # extra for the Redis bridge
 ```

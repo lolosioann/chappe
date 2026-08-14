@@ -12,7 +12,7 @@
 #
 # Knobs (all optional):
 #   PREFIX=/usr/local        where to install
-#   CHAPPE_REF=v3.0.0        version to build; defaults to the latest release
+#   CHAPPE_REF=v1.0.0        version to build; defaults to the latest release
 #   CHAPPE_USER=someone      uid the daemon runs as; see the note below
 #   CHAPPE_SOCKET=/tmp/chappe.sock   listen address
 #   SYSTEMD_DIR=/etc/systemd/system  where the unit goes
@@ -64,10 +64,14 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
 say "chappe $CHAPPE_REF -> $PREFIX"
-# -f so a 404 is a failed download, not an HTML error page piped into tar.
+# A tag normally, but a branch works too, so you can install unreleased work
+# without hand-building. -f so a 404 is a failed download rather than an HTML
+# error page piped into tar.
 curl -fsSL -o "$TMP/src.tar.gz" \
-  "https://github.com/$REPO/archive/refs/tags/$CHAPPE_REF.tar.gz" ||
-  die "could not download $CHAPPE_REF — check that version exists"
+     "https://github.com/$REPO/archive/refs/tags/$CHAPPE_REF.tar.gz" 2>/dev/null ||
+  curl -fsSL -o "$TMP/src.tar.gz" \
+       "https://github.com/$REPO/archive/refs/heads/$CHAPPE_REF.tar.gz" ||
+  die "could not download $CHAPPE_REF — no such tag or branch"
 tar xzf "$TMP/src.tar.gz" -C "$TMP" || die "could not unpack $CHAPPE_REF"
 SRC=$(find "$TMP" -maxdepth 1 -type d -name 'chappe-*' | head -1)
 [ -n "$SRC" ] || die "unexpected archive layout"

@@ -12,7 +12,7 @@ namespace chappe {
 // config) and in python/chappe/__init__.py (__version__). Three copies rather
 // than a generated header, because generating one would put a build step in
 // front of a header-only library; test_chappe.py fails if they drift apart.
-constexpr const char *VERSION = "3.0.0";
+constexpr const char *VERSION = "1.0.0";
 
 // ---- Topic -----------------------------------------------------------------
 

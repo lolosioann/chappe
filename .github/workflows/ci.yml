@@ -89,7 +89,7 @@ jobs:
           cat > /tmp/c/CMakeLists.txt <<'EOF'
           cmake_minimum_required(VERSION 3.16)
           project(chappe_consumer CXX)
-          find_package(chappe 3.0 REQUIRED)
+          find_package(chappe 1.0 REQUIRED)
           add_executable(app app.cpp)
           target_link_libraries(app PRIVATE chappe::chappe)
           EOF
@@ -98,12 +98,12 @@ jobs:
 
       # The documented invocation is `| sh`, and /bin/sh here is dash — stricter
       # than the shell it was written under, which is the point of running it.
-      # It installs the latest *release*, so this also checks the published
-      # tarball still builds.
+      # Pinned to main rather than the default (latest release) so this tests the
+      # tree being pushed, and does not go red whenever no release exists.
       - name: Installer runs under /bin/sh
         run: |
           mkdir -p /tmp/units
-          PREFIX=/tmp/ip SYSTEMD_DIR=/tmp/units sh scripts/install.sh
+          PREFIX=/tmp/ip SYSTEMD_DIR=/tmp/units CHAPPE_REF=main sh scripts/install.sh
           test -x /tmp/ip/bin/chappe_daemon
           test -x /tmp/ip/bin/chappe_link
           test -f /tmp/ip/lib/pkgconfig/chappe.pc
