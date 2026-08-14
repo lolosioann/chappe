@@ -49,7 +49,7 @@ g++ -std=c++17 app.cpp $(pkg-config --cflags --libs chappe) -o app
 ```
 
 ```cmake
-find_package(chappe 2.0 REQUIRED)
+find_package(chappe 3.0 REQUIRED)
 target_link_libraries(myapp PRIVATE chappe::chappe)   # headers, shm ring, pthread, rt
 ```
 

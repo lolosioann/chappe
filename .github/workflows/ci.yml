@@ -89,7 +89,7 @@ jobs:
           cat > /tmp/c/CMakeLists.txt <<'EOF'
           cmake_minimum_required(VERSION 3.16)
           project(chappe_consumer CXX)
-          find_package(chappe 2.0 REQUIRED)
+          find_package(chappe 3.0 REQUIRED)
           add_executable(app app.cpp)
           target_link_libraries(app PRIVATE chappe::chappe)
           EOF

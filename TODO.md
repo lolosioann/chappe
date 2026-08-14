@@ -185,3 +185,6 @@ this needs.
       workflow checked the tag against the version in the tree and attached the
       sdist and wheel. Repo renamed to `chappe` — the old URL still redirects,
       but `git remote set-url` is worth doing on each existing clone.
+- [x] **v3.0.0 released.** The link ABI handshake and the GStreamer frame
+      bridge. Major because a v2 link and a v3 link won't handshake, so both
+      ends of a link upgrade together; everything else is a rebuild.

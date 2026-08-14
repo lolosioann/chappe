@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## v3.0.0
+
+Major for one reason: links now open with a handshake, so a v2 link and a v3
+link will not talk to each other. Upgrade both ends of a link together. Nothing
+else breaks — the client/daemon protocol, the C++ API and the Python API are all
+unchanged from v2, so a node only needs a rebuild.
 
 ### Frames across devices, as video
 

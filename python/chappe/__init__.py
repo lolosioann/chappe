@@ -23,7 +23,7 @@ from collections import namedtuple
 from concurrent.futures import Future, ThreadPoolExecutor
 
 # Kept in step with chappe::VERSION and the Makefile by test_chappe.py.
-__version__ = "2.0.0"
+__version__ = "3.0.0"
 
 # Frame kinds — must match the enum in include/ipc/transport.hpp.
 (_SUBSCRIBE, _UNSUBSCRIBE, _PUBLISH, _KV_SET, _KV_GET, _KV_REPLY, _KV_UPDATE,
