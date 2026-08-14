@@ -1,0 +1,18 @@
+set(PACKAGE_VERSION "@VERSION@")
+
+# Same-major compatibility: the wire protocol and the C++ API are stable within
+# a major version, and the rename to chappe is exactly why that matters.
+if(PACKAGE_VERSION VERSION_LESS PACKAGE_FIND_VERSION)
+  set(PACKAGE_VERSION_COMPATIBLE FALSE)
+else()
+  string(REGEX MATCH "^[0-9]+" _found_major "${PACKAGE_VERSION}")
+  string(REGEX MATCH "^[0-9]+" _want_major "${PACKAGE_FIND_VERSION}")
+  if(_found_major STREQUAL _want_major)
+    set(PACKAGE_VERSION_COMPATIBLE TRUE)
+    if(PACKAGE_FIND_VERSION STREQUAL PACKAGE_VERSION)
+      set(PACKAGE_VERSION_EXACT TRUE)
+    endif()
+  else()
+    set(PACKAGE_VERSION_COMPATIBLE FALSE)
+  endif()
+endif()

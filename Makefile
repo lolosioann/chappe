@@ -181,25 +181,44 @@ examples: $(ALL_EXAMPLES) $(BINDIR)/chappe_daemon
 
 # ---- install ---------------------------------------------------------------
 
+# pkg-config and CMake describe the same thing: headers under include/chappe,
+# link libshm_ring + threads + rt. They are generated here in the recipe rather
+# than as file targets, because their content depends on $(PREFIX) — a variable
+# make can't take a dependency on, so a file target would go stale the moment
+# you installed to a second prefix. @PREFIX@ is the install prefix and never
+# DESTDIR: a staged package must say where it will finally live.
 install: $(BINDIR)/chappe_daemon $(BINDIR)/chappe_link $(BINDIR)/libshm_ring.so
+	sed -e 's|@PREFIX@|$(PREFIX)|g' -e 's|@VERSION@|$(VERSION)|g' \
+	    packaging/chappe.pc.in > $(BINDIR)/chappe.pc
+	sed -e 's|@VERSION@|$(VERSION)|g' \
+	    packaging/chappeConfig.cmake.in > $(BINDIR)/chappeConfig.cmake
+	sed -e 's|@VERSION@|$(VERSION)|g' \
+	    packaging/chappeConfigVersion.cmake.in > $(BINDIR)/chappeConfigVersion.cmake
 	install -d $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/lib \
 	           $(DESTDIR)$(PREFIX)/include/chappe/ipc \
-	           $(DESTDIR)$(PREFIX)/lib/chappe/python/chappe
+	           $(DESTDIR)$(PREFIX)/lib/chappe/python/chappe \
+	           $(DESTDIR)$(PREFIX)/lib/pkgconfig \
+	           $(DESTDIR)$(PREFIX)/lib/cmake/chappe
 	install -m 755 $(BINDIR)/chappe_daemon  $(DESTDIR)$(PREFIX)/bin/
 	install -m 755 $(BINDIR)/chappe_link    $(DESTDIR)$(PREFIX)/bin/
 	install -m 644 $(BINDIR)/libshm_ring.so $(DESTDIR)$(PREFIX)/lib/
 	install -m 644 $(PUB_HEADERS)           $(DESTDIR)$(PREFIX)/include/chappe/
 	install -m 644 include/ipc/*.hpp        $(DESTDIR)$(PREFIX)/include/chappe/ipc/
 	install -m 644 python/chappe/*.py       $(DESTDIR)$(PREFIX)/lib/chappe/python/chappe/
-	@echo "installed to $(DESTDIR)$(PREFIX)"
-	@echo "  C++:    compile with -I$(PREFIX)/include/chappe, link $(PREFIX)/lib/libshm_ring.so -lrt"
-	@echo "  Python: export PYTHONPATH=$(PREFIX)/lib/chappe/python"
+	install -m 644 $(BINDIR)/chappe.pc      $(DESTDIR)$(PREFIX)/lib/pkgconfig/
+	install -m 644 $(BINDIR)/chappeConfig.cmake $(BINDIR)/chappeConfigVersion.cmake \
+	                                        $(DESTDIR)$(PREFIX)/lib/cmake/chappe/
+	@echo "installed chappe $(VERSION) to $(DESTDIR)$(PREFIX)"
+	@echo "  C++:    pkg-config --cflags --libs chappe   (or find_package(chappe))"
+	@echo "  Python: export PYTHONPATH=$(PREFIX)/lib/chappe/python   (or pip install chappe)"
 	@echo "  daemon: $(PREFIX)/bin/chappe_daemon"
 
 uninstall:
 	rm -f  $(DESTDIR)$(PREFIX)/bin/chappe_daemon
 	rm -f  $(DESTDIR)$(PREFIX)/bin/chappe_link
 	rm -f  $(DESTDIR)$(PREFIX)/lib/libshm_ring.so
+	rm -f  $(DESTDIR)$(PREFIX)/lib/pkgconfig/chappe.pc
+	rm -rf $(DESTDIR)$(PREFIX)/lib/cmake/chappe
 	rm -rf $(DESTDIR)$(PREFIX)/include/chappe
 	rm -rf $(DESTDIR)$(PREFIX)/lib/chappe
 	@echo "uninstalled from $(DESTDIR)$(PREFIX)"

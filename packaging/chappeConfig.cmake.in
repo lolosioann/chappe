@@ -1,0 +1,27 @@
+# find_package(chappe) — the C++ client is header-only, but it links the C shm
+# ring and needs threads, so consumers want a target rather than a bare -I.
+#
+#   find_package(chappe 2.0 REQUIRED)
+#   target_link_libraries(myapp PRIVATE chappe::chappe)
+
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+
+# This file installs to <prefix>/lib/cmake/chappe, so the prefix is three up.
+# Derived rather than baked in so a relocated or DESTDIR-staged tree still works.
+get_filename_component(_chappe_prefix "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+
+find_library(chappe_SHM_RING_LIBRARY NAMES shm_ring HINTS "${_chappe_prefix}/lib")
+if(NOT chappe_SHM_RING_LIBRARY)
+  set(chappe_FOUND FALSE)
+  set(chappe_NOT_FOUND_MESSAGE "libshm_ring not found under ${_chappe_prefix}/lib")
+  return()
+endif()
+
+if(NOT TARGET chappe::chappe)
+  add_library(chappe::chappe INTERFACE IMPORTED)
+  set_target_properties(chappe::chappe PROPERTIES
+    INTERFACE_INCLUDE_DIRECTORIES "${_chappe_prefix}/include/chappe"
+    INTERFACE_COMPILE_FEATURES cxx_std_17
+    INTERFACE_LINK_LIBRARIES "${chappe_SHM_RING_LIBRARY};Threads::Threads;rt")
+endif()
