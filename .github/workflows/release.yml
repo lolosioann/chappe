@@ -1,0 +1,41 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # A tag is immutable once people have fetched it, so catch a mismatch here
+      # rather than shipping a v2.0.1 release containing 2.0.0. Checking one of
+      # the three version literals is enough: test_chappe.py already fails if
+      # chappe::VERSION, the Makefile and __version__ disagree.
+      - name: Tag matches the version in the tree
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          have=$(python3 -c "import re,pathlib; \
+            print(re.search(r'__version__ = \"([^\"]+)\"', \
+            pathlib.Path('python/chappe/__init__.py').read_text()).group(1))")
+          if [ "$tag" != "$have" ]; then
+            echo "tag $GITHUB_REF_NAME says $tag, tree says $have"; exit 1
+          fi
+
+      - name: Build sdist and wheel
+        run: |
+          python3 -m pip install --quiet build
+          python3 -m build
+
+      # The wheel is tagged for this exact interpreter and glibc, so it is a
+      # convenience for matching machines; the sdist is the portable artifact
+      # and compiles the ring wherever it lands.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes

@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## v2.0.0
+
+Major because the rename below breaks every include, import and environment
+variable at once. The wire protocol itself is untouched — frame kinds and
+framing are identical to v1, so a v1 and a v2 process still understand each
+other *if you point them at the same socket*. The default address moved, so
+during a mixed rollout name the path explicitly rather than relying on it.
 
 ### Renamed to chappe — breaking
 
@@ -148,6 +154,32 @@ towers each reading its neighbour and passing the message on — which is what a
   because a `KV_REPLY` makes the client cache the value and mark the key
   watched. The daemon registers no watcher for these, so that entry would never
   be refreshed and every later `get` would serve it.
+
+### Packaging & distribution
+- **`pip install chappe`** — `pyproject.toml` makes the Python client a real
+  package. The wheel compiles `src/shm_ring.c` into it (as `chappe._shm_ring`,
+  loaded by `ctypes`, never imported — it has no `PyInit`), so frames work off a
+  pip install alone, with no `make` step and no `$CHAPPE_LIB`. `chappe[redis]`
+  pulls `redis-py`; the client itself stays stdlib-only. The bridge installs as
+  a `chappe-redis-bridge` command.
+- **pkg-config and CMake** — `make install` now also writes `chappe.pc` and a
+  `chappeConfig.cmake` exposing `chappe::chappe` (headers, `libshm_ring`,
+  threads, `rt`, C++17), so consumers stop hand-writing `-I` and `-l` flags.
+  Both are generated during the install recipe rather than as build targets:
+  their contents depend on `$(PREFIX)`, which make cannot take a dependency on,
+  so a file target would quietly go stale the moment you installed to a second
+  prefix.
+- **One version, three literals** — `chappe::VERSION`, the Makefile's `VERSION`
+  (which stamps both config files) and Python's `__version__`. Generating them
+  from one source would put a build step in front of a header-only library, so
+  instead `test_chappe.py` fails if they ever disagree, and the release workflow
+  refuses a tag that doesn't match the tree.
+- **CI builds the packages on every push**, installs the sdist with
+  `--no-binary` so the ring is compiled the way a source install compiles it,
+  and builds a C++ consumer against an installed prefix through *both* the
+  pkg-config and `find_package` paths — a release should never be the first time
+  any of that runs. Tagging `v*` attaches the sdist and wheel to a GitHub
+  release.
 
 ## v1.0.0
 

@@ -162,9 +162,19 @@ durability/HA (see *Resilience*, but mostly out of scope per above).
 
 ## Python
 
-- [ ] `pip`-installable package (`pyproject.toml` / wheel).
+- [x] **`pip`-installable package.** Done: `pyproject.toml` + a `setup.py` that
+      exists only to declare the C ring as an extension, so a wheel carries a
+      compiled `chappe._shm_ring` and frames work without a `make` step. Not on
+      PyPI — releases attach an sdist and a wheel to a GitHub tag, and the wheel
+      is tagged for the exact interpreter and glibc that built it, so the sdist
+      is the portable artifact. Publishing to PyPI would need a manylinux build
+      (`cibuildwheel`); add that if anyone outside the fleet wants it.
 - [ ] `asyncio` client variant (current one is threaded/blocking).
 
 ## Housekeeping
 
 - [x] LICENSE (MIT) + CHANGELOG for v1.0.0. Tag `v1.0.0` on the release commit.
+- [ ] Tag `v2.0.0` on the rename/packaging commit. The `release` workflow fires
+      on `v*`, checks the tag against the version in the tree, and attaches the
+      sdist and wheel. Rename the GitHub repo to `chappe` too — the old URL keeps
+      redirecting, but `git remote set-url` is worth doing on each clone.

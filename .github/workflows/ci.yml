@@ -32,3 +32,59 @@ jobs:
 
       - name: Redis bridge self-check
         run: python3 python/test_bridge.py
+
+  # Packaging is checked on every push, not just on a tag — a release should
+  # never be the first time these are built.
+  packaging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build sdist and wheel
+        run: |
+          python3 -m pip install --quiet build
+          python3 -m build
+
+      # Installs the sdist with no wheel allowed, so the C ring is compiled the
+      # way a source install would compile it, then uses the ring from the
+      # installed package alone — cwd is / so nothing resolves to the repo.
+      - name: Install from sdist and exercise the packaged ring
+        run: |
+          python3 -m venv /tmp/v
+          /tmp/v/bin/pip install --quiet --no-binary :all: dist/*.tar.gz
+          cd / && /tmp/v/bin/python -c "
+          import chappe
+          from chappe import shm_ring
+          assert '/tmp/v/' in shm_ring._lib_path(), shm_ring._lib_path()
+          r = shm_ring.Ring.create('/chappe_ci', 32, 2)
+          assert r.write(b'packaged')
+          i, v = r.retain_latest()
+          assert bytes(v[:8]) == b'packaged'
+          r.release(i); r.destroy()
+          print('packaged ring OK, chappe', chappe.__version__)
+          "
+
+      # Both integration paths, against an installed prefix rather than the
+      # source tree — that is the only way a broken .pc or Config.cmake shows up.
+      - name: C++ consumer builds against the installed prefix
+        run: |
+          make install PREFIX=/tmp/p
+          export PKG_CONFIG_PATH=/tmp/p/lib/pkgconfig
+          pkg-config --exists --print-errors chappe
+          g++ -std=c++17 -Wall -Wextra examples/keyvalue.cpp \
+              $(pkg-config --cflags --libs chappe) -o /tmp/app_pc
+          mkdir -p /tmp/c && cp examples/keyvalue.cpp /tmp/c/app.cpp
+          cat > /tmp/c/CMakeLists.txt <<'EOF'
+          cmake_minimum_required(VERSION 3.16)
+          project(chappe_consumer CXX)
+          find_package(chappe 2.0 REQUIRED)
+          add_executable(app app.cpp)
+          target_link_libraries(app PRIVATE chappe::chappe)
+          EOF
+          cmake -S /tmp/c -B /tmp/c/build -DCMAKE_PREFIX_PATH=/tmp/p
+          cmake --build /tmp/c/build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/

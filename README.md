@@ -36,13 +36,42 @@ make install PREFIX=~/.local      # or a user prefix, no sudo
 make uninstall                    # same PREFIX/DESTDIR removes it
 ```
 
-Installs the `chappe_daemon` binary, `libshm_ring.so`, the C++ headers under
-`include/chappe/`, and the Python modules. It prints the exact flags; in short:
+Installs the `chappe_daemon` and `chappe_link` binaries, `libshm_ring.so`, the
+C++ headers under `include/chappe/`, a pkg-config file, a CMake package config,
+and the Python package. `DESTDIR` is supported for staged/distro packaging.
 
-- **C++:** `-I$PREFIX/include/chappe`, link `$PREFIX/lib/libshm_ring.so -lrt`.
-- **Python:** `export PYTHONPATH=$PREFIX/lib/chappe/python` (set `$CHAPPE_LIB`
-  if `libshm_ring.so` isn't on a standard path). Supports `DESTDIR` for staged
-  packaging.
+### Using it from C++
+
+Either integration works; both point at the same headers and library.
+
+```sh
+g++ -std=c++17 app.cpp $(pkg-config --cflags --libs chappe) -o app
+```
+
+```cmake
+find_package(chappe 2.0 REQUIRED)
+target_link_libraries(myapp PRIVATE chappe::chappe)   # headers, shm ring, pthread, rt
+```
+
+If you installed to a non-standard prefix, point the tools at it with
+`PKG_CONFIG_PATH=$PREFIX/lib/pkgconfig` or `-DCMAKE_PREFIX_PATH=$PREFIX`.
+
+### Using it from Python
+
+```sh
+pip install chappe            # client + the shm ring, compiled for your interpreter
+pip install 'chappe[redis]'   # also pulls redis-py, for the bridge below
+```
+
+The wheel builds `src/shm_ring.c` into the package, so frames work off a `pip
+install` alone — no `make` step and no `$CHAPPE_LIB`. Releases attach an sdist
+and a wheel; the sdist is the portable one, since a wheel is tied to the exact
+interpreter and glibc that built it.
+
+`make install` also drops the package under `$PREFIX/lib/chappe/python` for
+anyone who would rather set `PYTHONPATH` than use pip — that copy has no
+compiled ring beside it, so it falls back to the installed `libshm_ring.so`
+(override with `$CHAPPE_LIB`).
 
 ## Run the daemon
 
