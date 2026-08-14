@@ -226,10 +226,19 @@ void test_watcher_dropped_when_last_watcher_leaves() {
   Node probe("probe");
   probe.connect(p);
   probe.set<int>("k", 1);
+  // set() is fire-and-forget, and the watcher below is a *different*
+  // connection, so without a barrier the daemon may answer its get before it
+  // applies this set. sync() round-trips, which orders the two.
+  probe.sync();
   {
     Node watcher("watcher");
     watcher.connect(p);
-    ASSERT_EQ(watcher.get<int>("k").value(), 1); // cold get starts the watch
+    auto v = watcher.get<int>("k"); // cold get starts the watch
+    // Not .value(): on an empty optional that throws, and an uncaught throw
+    // aborts the whole suite without flushing the buffered results, so the
+    // report says nothing about which case died.
+    ASSERT_TRUE(v.has_value());
+    ASSERT_EQ(v.value_or(0), 1);
     ASSERT_TRUE(probe.info().find("kv_watchers: 1") != std::string::npos);
   } // watcher disconnects
 
