@@ -451,6 +451,91 @@ def test_protocol_parity():
     print("python protocol parity self-check OK")
 
 
+def test_serialization():
+    """publish/set take Python values, not just bytes — and bytes still go out
+    byte for byte, which is what keeps C++ topics and frames working."""
+    with Daemon("ser") as d:
+        sock = d.sock
+        with chappe.Node("pub") as pub, chappe.Node("sub") as sub:
+            pub.connect(sock)
+            sub.connect(sock)
+            got = []
+            sub.subscribe("v", got.append)
+            sub.sync()
+
+            values = [17, -3, 3.25, "hello", True, False, None,
+                      [1, 2, "three"], {"mode": "race", "gear": 3}, {}, []]
+            for v in values:
+                pub.publish("v", v)
+            pub.sync()
+            sub.sync()
+            assert got == values, f"{got} != {values}"
+
+            # bytes are untouched: same object value, no magic, no JSON. This is
+            # the C++ interop path — struct.pack must survive exactly.
+            got.clear()
+            raw = struct.pack("=i", 42)
+            pub.publish("v", raw)
+            pub.sync()
+            sub.sync()
+            assert got == [raw], got
+            assert struct.unpack("=i", got[0])[0] == 42
+
+            # A raw payload that happens to open with the magic must NOT be
+            # mistaken for ours — the JSON behind it doesn't parse, so it comes
+            # back as the bytes that were sent.
+            got.clear()
+            impostor = chappe._MAGIC + b"\xff\xfe not json"
+            pub.publish("v", impostor)
+            pub.sync()
+            sub.sync()
+            assert got == [impostor], got
+
+            # A hostile payload must not kill the reader thread. This one wears
+            # the magic and is nested deep enough that json.loads raises
+            # RecursionError, which is not a ValueError — decoding it has to
+            # fail soft, and the node has to keep working afterwards.
+            got.clear()
+            bomb = chappe._MAGIC + b"[" * 200_000 + b"]" * 200_000
+            pub.publish("v", bomb)
+            pub.sync()
+            sub.sync()
+            assert got == [bomb], "decode bomb was not passed through as bytes"
+            got.clear()
+            pub.publish("v", "still alive")
+            pub.sync()
+            sub.sync()
+            assert got == ["still alive"], f"reader died on a bad payload: {got}"
+
+            # kv takes the same values and gives them back as the same types.
+            for i, v in enumerate(values):
+                pub.set(f"k{i}", v)
+            pub.sync()
+            for i, v in enumerate(values):
+                assert pub.get(f"k{i}") == v, f"k{i}: {pub.get(f'k{i}')} != {v}"
+            pub.set("kraw", raw)
+            pub.sync()
+            assert pub.get("kraw") == raw
+
+            # Unsupported values fail loudly rather than being mangled.
+            for bad in ({1, 2}, {"blob": b"bytes don't nest"}, object()):
+                try:
+                    pub.publish("v", bad)
+                    assert False, f"expected TypeError for {bad!r}"
+                except TypeError as e:
+                    assert "chappe cannot serialize" in str(e), e
+
+            # incr's representation is fixed, so a serialized int is not a
+            # counter — the documented sharp edge, asserted so it stays true.
+            pub.set("count", struct.pack("=q", 5))
+            pub.sync()
+            assert pub.incr("count") == 6
+            pub.set("notcount", 5)
+            pub.sync()
+            assert pub.incr("notcount") is None, "serialized int must not incr"
+    print("python serialization self-check OK")
+
+
 def test_version_parity():
     """The version is written out three times — chappe::VERSION, the Makefile's
     VERSION (which stamps chappe.pc and the CMake config) and __version__. That
@@ -478,4 +563,5 @@ if __name__ == "__main__":
     test_retained_clear()
     test_handler_pool()
     test_protocol_parity()
+    test_serialization()
     test_version_parity()

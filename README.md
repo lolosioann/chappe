@@ -278,24 +278,44 @@ the snapshot once its last subscriber/watcher disconnects.
 ## Python
 
 `python/chappe/` is a Python client that speaks the same wire protocol, so
-Python nodes interoperate with C++ nodes over the same `chappe_daemon`. Messages
-are `bytes` — bring your own serialization:
+Python nodes interoperate with C++ nodes over the same `chappe_daemon`.
+
+Between Python nodes, publish and set take ordinary values — `str`, `int`,
+`float`, `bool`, `None`, `list`, `dict` — and they arrive as the same type:
 
 ```python
 from chappe import Node
-import struct
 
 with Node("py") as node:
     node.connect()                                   # $CHAPPE_SOCKET or /tmp/chappe.sock
-    node.subscribe("tick", lambda p: print(struct.unpack("=i", p)[0]))
+    node.subscribe("telemetry", lambda v: print(v["speed"]))
     node.sync()
-    node.publish("tick", struct.pack("=i", 42))
-    node.set("mode", b"race")
-    print(node.get("mode"))                          # b'race'
+    node.publish("telemetry", {"speed": 3.4, "gear": 2})
+    node.set("mode", "race")
+    print(node.get("mode"))                          # 'race'
 ```
 
-Because it's the same wire format, a Python subscriber decodes a C++ node's
-messages directly — a C++ `struct Tick { int seq; }` is `struct.pack("=i", seq)`.
+**To talk to a C++ node, send `bytes`.** Those go out untouched, so the wire
+format is whatever that topic's `wire_codec<T>` expects — a C++
+`struct Tick { int seq; }` is `struct.pack("=i", seq)`:
+
+```python
+node.subscribe("tick", lambda p: print(struct.unpack("=i", p)[0]))
+node.publish("tick", struct.pack("=i", 42))
+```
+
+- The serialized form is **Python-to-Python**: a C++ subscriber sees it as
+  opaque bytes, since `wire_codec<T>` is a compile-time POD mapping.
+- It is JSON, not pickle — a link forwards payloads between devices with no auth
+  on the wire, and unpickling that would be remote code execution. So tuples
+  come back as lists, dict keys come back as strings, and `bytes` cannot nest
+  inside a list or dict (top-level `bytes` are fine). Anything else raises
+  `TypeError` rather than being mangled.
+- `Node(name, decode=False)` gives handlers and `get()` the raw bytes, for code
+  that forwards payloads on verbatim. The Redis bridge uses it.
+- `incr` fixes its counter at a native-endian int64, so seed one with
+  `set(k, struct.pack("=q", n))` — `set(k, n)` stores the serialized form and
+  `incr` rejects it.
 
 - **pub/sub and get/set** are pure stdlib — no build, no dependencies.
 - **Same surface as C++** — `unsubscribe`/`unsubscribe_pattern`,

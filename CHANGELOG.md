@@ -1,5 +1,49 @@
 # Changelog
 
+## Unreleased
+
+### Python publish/set take values, not just bytes
+
+`publish("number", 17)` used to fail with "object of type 'int' has no len()".
+Now str, int, float, bool, None, list and dict are serialized as JSON behind a
+four-byte magic, and arrive as the same type on any Python subscriber or `get()`.
+
+This is additive by construction: **bytes still go out byte for byte**, so every
+C++ topic, every `wire_codec<T>`, the frame handles and the shm path are exactly
+as they were. Only values that previously raised gained a representation. The
+magic is what makes decoding safe to do unconditionally — a C++ POD almost never
+starts with those four bytes, and if one does, the JSON behind it fails to parse
+and the raw bytes are handed back untouched.
+
+The serialized form is **Python-to-Python**. A C++ subscriber sees opaque bytes,
+because `wire_codec<T>` is a compile-time POD mapping with nowhere to put a
+dict. Cross-language topics still want `struct.pack` matching the C++ type; that
+is unchanged and still the documented route.
+
+JSON, not pickle, and deliberately: `chappe_link` forwards payloads between
+devices over TCP with no auth, so a pickle payload would be remote code
+execution on the far device. JSON's edges are the price — tuples come back as
+lists, dict keys come back as strings, and `bytes` cannot nest inside a list or
+dict. Unsupported values raise `TypeError` naming the type rather than being
+quietly mangled.
+
+Two things fell out of building it:
+
+- **`Node(name, decode=False)`** hands handlers and `get()` the exact bytes off
+  the wire. Anything that forwards payloads onward wants this, and the Redis
+  bridge now uses it — it had started receiving dicts from `get()`, which
+  redis-py cannot store (`DataError`), so mirrored dict/list values would have
+  silently stopped reaching Redis.
+- Decoding runs on the reader thread, **outside** the guard that keeps a bad
+  handler from killing it, and payloads arrive from any local process or across
+  a link. So a failed decode falls back to raw bytes on *any* exception, not
+  just `ValueError` — JSON nested deeply enough raises `RecursionError`, which
+  would otherwise have made the node silently go deaf.
+
+Counters are the one sharp edge: `incr` fixes its representation at a
+native-endian int64, so seed one with `set(k, struct.pack("=q", n))`. `set(k, n)`
+stores the serialized form and `incr` correctly rejects it.
+
 ## v3.0.0
 
 Major for one reason: links now open with a handshake, so a v2 link and a v3

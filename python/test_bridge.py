@@ -15,6 +15,7 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import chappe
 from chappe import Node
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -76,13 +77,14 @@ def main():
             app.set("state/mode", b"idle")
             app.sync()
 
-            bnode = Node("redis-bridge")
+            bnode = Node("redis-bridge", decode=False)  # as main() does
             bnode.connect(sock)
             bridge = redis_bridge.Bridge(bnode, r, "chappe:", 0.02,
                                          ["chappe:cmd/*"])
             threading.Thread(
                 target=bridge.run,
-                args=(["telemetry/*", "cmd/*"], ["state/mode", "state/gear"]),
+                args=(["telemetry/*", "cmd/*"],
+                      ["state/mode", "state/gear", "state/cfg"]),
                 daemon=True).start()
 
             # kv ours -> Redis, including a value written after the bridge is up
@@ -94,6 +96,15 @@ def main():
             # a counter crosses as raw bytes, still readable as an int64
             app.set("state/mode", b"run")
             assert wait_for(lambda: r.get("chappe:state/mode") == b"run")
+
+            # A serialized value (dict) mirrors as its raw bytes. Before the
+            # bridge asked for undecoded payloads this raised DataError inside
+            # redis-py, because you cannot hand it a dict.
+            app.set("state/cfg", {"mode": "race", "gear": 3})
+            app.sync()
+            assert wait_for(
+                lambda: r.get("chappe:state/cfg") == chappe._encode(
+                    {"mode": "race", "gear": 3})), r.get("chappe:state/cfg")
 
             # kv delete propagates as a Redis delete
             app.delete("state/gear")

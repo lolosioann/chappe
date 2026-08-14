@@ -162,7 +162,8 @@ def main(argv=None):
 
     r = redis.Redis(host=args.redis_host, port=args.redis_port, db=args.redis_db)
     r.ping()  # fail here with a clear error, not later inside a handler
-    with Node("redis-bridge") as node:
+    # decode=False: the bridge mirrors bytes onward, so it wants them verbatim.
+    with Node("redis-bridge", decode=False) as node:
         node.connect(args.socket)
         bridge = Bridge(node, r, args.prefix, args.poll_ms / 1000.0,
                         [args.prefix + p for p in args.inbound])

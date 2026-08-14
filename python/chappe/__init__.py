@@ -8,12 +8,15 @@ Covers pub/sub, the get/set store, and the zero-copy shared-memory frame
 transport (the last via chappe/shm_ring.py, a ctypes binding to the same C ring
 the C++ side uses — a wheel builds it in, otherwise `make libshm_ring`).
 
-Messages are bytes — bring your own serialization (struct, json, msgpack, ...).
-The daemon routes opaque payloads by string topic, so to interoperate with a
-C++ topic your bytes must match whatever that topic's wire_codec<T> produces
-(e.g. a C++ `struct Tick { int seq; }` is `struct.pack("=i", seq)`).
+The daemon routes opaque payloads by string topic. str/int/float/bool/None/
+list/dict are serialized for you and arrive as the same type on another Python
+node; bytes are sent untouched. To interoperate with a C++ topic, send bytes
+matching whatever that topic's wire_codec<T> produces (a C++
+`struct Tick { int seq; }` is `struct.pack("=i", seq)`) — the serialized form is
+Python-to-Python only.
 """
 import itertools
+import json
 import os
 import socket
 import struct
@@ -38,6 +41,51 @@ _I64 = struct.Struct("=q")  # the counter representation incr fixes
 # struct's trailing padding, so this is exactly sizeof(FrameHandle) == 24.
 _FRAME = struct.Struct("=QIII4x")
 FrameMeta = namedtuple("FrameMeta", "timestamp_ns width height stride")
+
+# ---- convenience serialization ---------------------------------------------
+# publish/set take bytes, because the bus is payload-agnostic and a C++ node on
+# the same topic reads whatever wire_codec<T> produces. Requiring every Python
+# caller to pack an int by hand is a poor trade for the common Python-only case,
+# so anything that isn't already bytes is encoded as JSON behind a short magic.
+#
+# Bytes still go out untouched, byte for byte. That is what keeps this additive:
+# every existing topic, the frame handles and the C++ POD codecs are unaffected,
+# and only values that used to raise ("object of type 'int' has no len()") gain
+# a representation.
+#
+# The magic is what makes decoding safe to do unconditionally: a C++ POD payload
+# almost never starts with these four bytes, and if one does, the JSON parse
+# behind it fails and the raw bytes are handed back. Values encoded this way are
+# Python-to-Python — a C++ subscriber sees the JSON as opaque bytes.
+_MAGIC = b"\xc7ch\x01"
+
+
+def _encode(value):
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return bytes(value)
+    try:
+        return _MAGIC + json.dumps(value).encode()
+    except TypeError as e:
+        raise TypeError(
+            f"chappe cannot serialize {type(value).__name__}: {e}. bytes, str, "
+            "int, float, bool, None, list and dict are supported; bytes nested "
+            "inside a list or dict are not — pack those yourself and publish "
+            "the result as bytes.") from e
+
+
+def _decode(payload):
+    if not payload.startswith(_MAGIC):
+        return payload  # raw bytes: a C++ POD, a frame handle, or bytes we sent
+    try:
+        return json.loads(payload[len(_MAGIC):])
+    except Exception:
+        # Deliberately broad. This runs on the reader thread, outside the guard
+        # that stops a bad handler killing it, and the payload comes off the
+        # wire from any process on the box — or across a link, which has no auth
+        # at all. A malformed body is a wrong guess about the magic, not a
+        # reason to go deaf: hand back the raw bytes. Nesting deep enough to
+        # raise RecursionError is the case a ValueError-only catch misses.
+        return payload
 
 
 def _has_wildcard(s):
@@ -70,8 +118,14 @@ class Node:
     handlers run on a pool of that many workers instead of the reader thread,
     so they run concurrently with each other and with further receives."""
 
-    def __init__(self, name, threads=0):
+    def __init__(self, name, threads=0, decode=True):
         self.name = name
+        # decode=False hands handlers and get() the exact bytes off the wire.
+        # For anything that forwards payloads on verbatim — the Redis bridge —
+        # decoding and re-encoding is the wrong shape: it would have to turn the
+        # value back into bytes to pass it along, and a dict is not something
+        # redis-py can store.
+        self._decode = decode
         self._pool = ThreadPoolExecutor(max_workers=threads) if threads else None
         self._sock = None               # current socket; None during reconnect
         self._addr = None               # address to (re)connect to
@@ -144,11 +198,17 @@ class Node:
     # ---- pub/sub -----------------------------------------------------------
 
     def publish(self, topic, payload, retain=False):
-        """Publish `payload` (bytes) to `topic`. With retain=True the daemon
-        keeps it as the topic's last value and replays it to future subscribers;
-        the default is classic pub/sub (late subscribers miss it)."""
+        """Publish `payload` to `topic`. bytes go out untouched; str, int, float,
+        bool, None, list and dict are serialized for you and come back as the
+        same type on any Python subscriber. With retain=True the daemon keeps it
+        as the topic's last value and replays it to future subscribers; the
+        default is classic pub/sub (late subscribers miss it).
+
+        Send bytes when a C++ node is on the other end — it decodes with
+        wire_codec<T>, which knows nothing about the serialized form."""
         self._require_connected()
-        self._send(_PUBLISH_RETAIN if retain else _PUBLISH, topic.encode(), payload)
+        self._send(_PUBLISH_RETAIN if retain else _PUBLISH, topic.encode(),
+                   _encode(payload))
 
     def clear_retained(self, topic):
         """Drop `topic`'s retained value, so late subscribers get nothing. Wire
@@ -158,7 +218,9 @@ class Node:
         self._send(_PUBLISH_RETAIN, topic.encode(), b"")
 
     def subscribe(self, topic, handler):
-        """Register handler(payload: bytes) for `topic`. Legal before connect(),
+        """Register handler(payload) for `topic`; payload is whatever the
+        publisher sent — a str/int/list/dict if it sent one, else bytes. Legal
+        before connect(),
         which flushes the subscription to the daemon. Without a handler pool
         handlers run on the reader thread, so keep them quick (or hand off to
         your own queue)."""
@@ -225,10 +287,15 @@ class Node:
     # ---- get/set -----------------------------------------------------------
 
     def set(self, key, value, ttl_ms=0):
-        """Store `value` (bytes) under `key`. With ttl_ms > 0 the daemon deletes
-        the key that many milliseconds later and pushes the deletion to
-        watchers; a set without a ttl clears any the key had."""
+        """Store `value` under `key`, serialized like publish(): bytes as-is,
+        other types encoded and returned as that type by get(). With ttl_ms > 0
+        the daemon deletes the key that many milliseconds later and pushes the
+        deletion to watchers; a set without a ttl clears any the key had.
+
+        A counter you intend to incr() is the one case to pack yourself —
+        see incr()."""
         self._require_connected()
+        value = _encode(value)
         if ttl_ms:
             self._send(_KV_SETEX, key.encode(), _U32.pack(ttl_ms) + value)
         else:
@@ -240,7 +307,11 @@ class Node:
         concurrent nodes can't lose an increment the way a get/set pair would.
         The stored value is struct.pack("=q") bytes, so C++ nodes read it with
         get<int64_t>(). None means the key holds something else (nothing was
-        changed) or the link is down."""
+        changed) or the link is down.
+
+        That representation is fixed, so seed a counter with
+        set(key, struct.pack("=q", n)) — set(key, n) stores the serialized form
+        instead and incr() will reject it as the wrong type."""
         self._require_connected()
         reply = self._request(_KV_INCR, key.encode(), _I64.pack(by), timeout)
         # Length-checked like the C++ side's wire_codec decode: a reply that
@@ -255,7 +326,7 @@ class Node:
         holder that dies without delete()ing the key from deadlocking every
         other node forever."""
         self._require_connected()
-        extra = _U32.pack(ttl_ms) + value
+        extra = _U32.pack(ttl_ms) + _encode(value)
         # `is not None`, not a truth test: a win carries zero value bytes.
         return self._request(_KV_SETNX, key.encode(), extra, timeout) is not None
 
@@ -266,14 +337,18 @@ class Node:
         self._send(_KV_DEL, key.encode(), b"")
 
     def get(self, key, timeout=5.0):
-        """Return the value bytes, or None if unset. First read of a key
-        round-trips to the daemon and starts watching it; later reads are
-        served from the local cache, kept fresh by the daemon's pushes."""
+        """Return the value, or None if unset. Whatever set() serialized comes
+        back as that type; anything else — a C++ node's value, a counter — comes
+        back as bytes. First read of a key round-trips to the daemon and starts
+        watching it; later reads are served from the local cache, kept fresh by
+        the daemon's pushes."""
         self._require_connected()
         with self._kv_lock:
             if key in self._watched:
-                return self._cache.get(key)
-        return self._request(_KV_GET, key.encode(), timeout=timeout)
+                raw = self._cache.get(key)
+                return raw if raw is None or not self._decode else _decode(raw)
+        raw = self._request(_KV_GET, key.encode(), timeout=timeout)
+        return raw if raw is None or not self._decode else _decode(raw)
 
     # ---- frames (shared memory) -------------------------------------------
     # The pixels live in a shm ring keyed by the topic; only the FrameHandle
@@ -496,6 +571,10 @@ class Node:
             self._send(_SUBSCRIBE, t.encode(), b"")
 
     def _dispatch(self, topic, payload):
+        # Decode once for every handler on this message. A frame handle and any
+        # C++ POD lack the magic and pass straight through as bytes, so the
+        # frame path below is unaffected.
+        payload = _decode(payload) if self._decode else payload
         with self._subs_lock:
             handlers = list(self._subs.get(topic, ()))
             pmatched = [h for pat, hs in self._pattern_subs.items()
