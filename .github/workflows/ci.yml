@@ -6,7 +6,7 @@ jobs:
   build-and-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # g++ and python3 are preinstalled on ubuntu-latest; shm needs no setup.
       - name: C++ suites
@@ -38,7 +38,7 @@ jobs:
   packaging:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Build sdist and wheel
         run: |
@@ -84,7 +84,7 @@ jobs:
           cmake -S /tmp/c -B /tmp/c/build -DCMAKE_PREFIX_PATH=/tmp/p
           cmake --build /tmp/c/build
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: dist
           path: dist/

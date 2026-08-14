@@ -11,7 +11,7 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # A tag is immutable once people have fetched it, so catch a mismatch here
       # rather than shipping a v2.0.1 release containing 2.0.0. Checking one of
