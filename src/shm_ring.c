@@ -18,12 +18,14 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #include "shm_ring.h"
+#include <errno.h>
 #include <fcntl.h>
 #include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -121,8 +123,24 @@ shm_ring_t *shm_ring_create(const char *name, size_t slot_size, u32 num_slots)
 	ring->is_owner = 1;
 	ring->total_size = SLOTS_OFFSET + (size_t)num_slots * ring->stride;
 
+	/*
+	 * POSIX shm outlives the process that made it, so a producer killed
+	 * before shm_ring_destroy() leaves the segment behind and O_EXCL would
+	 * lock it out of ever starting again. Reclaiming it blindly is worse
+	 * though: two live producers would each get a segment and silently
+	 * split the topic. So the owner holds an exclusive flock for its
+	 * lifetime -- the kernel drops it when the process dies -- and taking
+	 * that lock is what distinguishes an orphan from a running producer.
+	 */
 	ring->fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0660);
+	if (ring->fd < 0 && errno == EEXIST)
+		ring->fd = shm_open(name, O_RDWR, 0660);
 	if (ring->fd < 0) {
+		free(ring);
+		return NULL;
+	}
+	if (flock(ring->fd, LOCK_EX | LOCK_NB) != 0) {
+		close(ring->fd); /* a live producer already owns this topic */
 		free(ring);
 		return NULL;
 	}
@@ -144,6 +162,12 @@ shm_ring_t *shm_ring_create(const char *name, size_t slot_size, u32 num_slots)
 	}
 
 	ring->ctrl = (struct shm_ctrl *)ring->base;
+	/*
+	 * A reclaimed segment still carries the old magic, so a consumer could
+	 * attach mid-reinit and read valid-looking state over half-written
+	 * slots. Clear it first; it is published again at the end.
+	 */
+	atomic_store_explicit(&ring->ctrl->magic, 0, memory_order_release);
 	ring->ctrl->num_slots = num_slots;
 	ring->ctrl->slot_size = slot_size;
 	atomic_init(&ring->ctrl->last_ready, SHM_LAST_NONE);

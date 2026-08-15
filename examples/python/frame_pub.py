@@ -21,22 +21,29 @@ def main():
     Camera node: publishes 16x16 grayscale frames into a shared-memory
     ring.  Run frame_sub.py in another terminal to see them.
     """
-    camera = Node("camera")
-    try:
-        camera.connect()
-    except Exception:
-        print("Could not connect to daemon. Make sure chappe is installed and running")
-        return
+    # `with` matters for a producer: closing the node destroys the ring, which
+    # is what unlinks the shared-memory segment. Leaving it behind is survivable
+    # (the next run reclaims it) but it lingers until reboot.
+    with Node("camera") as camera:
+        try:
+            camera.connect()
+        except Exception:
+            print("Could not connect to daemon. Make sure chappe is installed and running")
+            return
 
-    camera.create_frame_ring("cam/front", W * H, 4)
+        camera.create_frame_ring("cam/front", W * H, 4)
 
-    print(f"-- camera publishing {W}x{H} frames --")
-    for f in range(30):
-        ok = camera.publish_frame("cam/front", 1000 + f, W, H, W, make_frame(f))
-        if not ok:
-            print("[camera] frame dropped (all slots held)")
-        time.sleep(0.1)
-    print("-- camera done --")
+        print(f"-- camera publishing {W}x{H} frames --")
+        try:
+            for f in range(30):
+                ok = camera.publish_frame("cam/front", 1000 + f, W, H, W,
+                                          make_frame(f))
+                if not ok:
+                    print("[camera] frame dropped (all slots held)")
+                time.sleep(0.1)
+        except KeyboardInterrupt:
+            pass
+        print("-- camera done --")
 
 
 if __name__ == "__main__":

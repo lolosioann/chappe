@@ -10,6 +10,8 @@
 #include <chrono>
 #include <cstring>
 #include <string>
+#include <fcntl.h>
+#include <stdexcept>
 #include <sys/mman.h>
 #include <thread>
 #include <unistd.h>
@@ -202,7 +204,55 @@ void test_frame_consumer_before_producer() {
   clean("/chappe_cam.late");
 }
 
+// POSIX shm outlives the process that created it, so a producer killed before
+// it could clean up leaves the segment behind. O_EXCL alone would then lock the
+// topic out forever — the camera node could never restart. The owner holds an
+// exclusive flock instead, which the kernel drops when it dies, so leftovers
+// with no live owner are reclaimable.
+void test_frame_ring_reclaims_orphan() {
+  const char *name = "/chappe_orphan_test";
+  clean(name);
+  // Exactly what a killed producer leaves: a segment nobody holds a lock on.
+  int fd = ::shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0660);
+  ASSERT_TRUE(fd >= 0);
+  ASSERT_TRUE(::ftruncate(fd, 4096) == 0);
+  ::close(fd);
+
+  bool ok = true;
+  try {
+    auto ring = chappe::SharedMemoryRing::create(name, 16, 4);
+    auto h = ring.acquire_write(); // and it is a working ring, not just open
+    ASSERT_TRUE(h.valid);
+    ring.publish(h.idx);
+  } catch (const std::exception &) {
+    ok = false;
+  }
+  ASSERT_TRUE(ok);
+  clean(name);
+}
+
+// The other half: a *live* producer must not be stolen from. Reclaiming
+// blindly would give each of two producers its own segment and split the topic
+// in silence, which is worse than the failure it replaced.
+void test_frame_ring_rejects_live_producer() {
+  const char *name = "/chappe_dup_test";
+  clean(name);
+  auto first = chappe::SharedMemoryRing::create(name, 16, 4);
+  bool threw = false;
+  try {
+    auto second = chappe::SharedMemoryRing::create(name, 16, 4);
+  } catch (const std::exception &) {
+    threw = true;
+  }
+  ASSERT_TRUE(threw);
+  clean(name);
+}
+
 int main() {
+  test_case("a killed producer's ring is reclaimed by the next one",
+            test_frame_ring_reclaims_orphan);
+  test_case("a live producer's ring is not stolen",
+            test_frame_ring_rejects_live_producer);
   test_case("a consumer that starts before the producer still gets frames",
             test_frame_consumer_before_producer);
   test_case("frame sync publish/subscribe", test_frame_sync);

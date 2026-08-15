@@ -67,6 +67,16 @@ bridges out to other devices, to Redis and to video.
 - **Producer abandon path** — `shm_ring_abandon_slot` returns an
   acquired-but-unpublished slot to the free pool, so a writer that throws does
   not leak a slot as `WRITING`.
+- **A producer can restart after being killed.** POSIX shm outlives the process
+  that created it, so a producer that dies before cleaning up leaves its segment
+  behind, and `O_EXCL` alone would lock the topic out permanently — a camera
+  node under a supervisor could never come back. The owner now holds an
+  exclusive `flock` for its lifetime, which the kernel releases when it dies, so
+  leftovers with no live owner are reclaimed and reinitialised. A *live* owner
+  still wins: two producers on one topic fail loudly rather than each taking a
+  segment and splitting the topic in silence. The magic is cleared before a
+  reclaimed segment is rebuilt, so a consumer cannot attach to half-written
+  state.
 - **Startup order doesn't matter.** The ring belongs to the producer, so a
   consumer that starts first has nothing to attach to. `subscribe_frame`
   attaches on the first frame instead — a handle arriving is proof the segment

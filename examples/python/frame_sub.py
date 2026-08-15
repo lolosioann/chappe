@@ -25,21 +25,24 @@ def main():
     Vision node: attaches to the camera's shared-memory ring and renders
     each incoming frame as ASCII art in the terminal.
     """
-    vision = Node("vision")
-    try:
-        vision.connect()
-    except Exception:
-        print("Could not connect to daemon. Make sure chappe is installed and running")
-        return
+    with Node("vision") as vision:
+        try:
+            vision.connect()
+        except Exception:
+            print("Could not connect to daemon. Make sure chappe is installed and running")
+            return
 
-    # No need to wait for the publisher: the ring is attached on the first
-    # frame, so this node can start first.
-    vision.subscribe_frame("cam/front", show_frame)
-    vision.sync()
+        # No need to wait for the publisher: the ring is attached on the first
+        # frame, so this node can start first.
+        vision.subscribe_frame("cam/front", show_frame)
+        vision.sync()
 
-    print("-- vision subscribed, waiting for frames (start frame_pub.py) --")
-    while True:
-        time.sleep(10)
+        print("-- vision subscribed, waiting for frames (start frame_pub.py) --")
+        try:
+            while True:
+                time.sleep(10)
+        except KeyboardInterrupt:
+            pass
 
 
 if __name__ == "__main__":
