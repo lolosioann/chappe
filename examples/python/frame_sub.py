@@ -38,9 +38,18 @@ def main():
         vision.sync()
 
         print("-- vision subscribed, waiting for frames (start frame_pub.py) --")
+        # Silence is ambiguous: no publisher yet, or handles arriving that we
+        # can't read. frame_drops() tells those apart, so say so rather than
+        # sitting there looking broken.
+        reported = 0
         try:
             while True:
-                time.sleep(10)
+                time.sleep(2)
+                drops = vision.frame_drops()
+                if drops > reported:
+                    print(f"[vision] {drops} frame(s) dropped — handles are "
+                          "arriving but the ring could not be read")
+                    reported = drops
         except KeyboardInterrupt:
             pass
 
