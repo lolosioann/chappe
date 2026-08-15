@@ -143,6 +143,7 @@ class Node:
         self._pending_lock = threading.Lock()
         self._ids = itertools.count(1)  # next(...) is atomic under the GIL
         self._rings = {}                # topic -> shm_ring.Ring
+        self._rings_lock = threading.Lock()  # handlers attach lazily, maybe on a pool
         self._frame_drops = 0
 
     # ---- lifecycle ---------------------------------------------------------
@@ -363,12 +364,33 @@ class Node:
     def create_frame_ring(self, topic, slot_size, num_slots):
         """Producer: own the ring for `topic`."""
         from .shm_ring import Ring
-        self._rings[topic] = Ring.create(self._ring_shm_name(topic), slot_size, num_slots)
+        with self._rings_lock:
+            self._rings[topic] = Ring.create(
+                self._ring_shm_name(topic), slot_size, num_slots)
 
     def attach_frame_ring(self, topic):
-        """Consumer: attach to the ring another node created for `topic`."""
-        from .shm_ring import Ring
-        self._rings[topic] = Ring.attach(self._ring_shm_name(topic))
+        """Optional: subscribe_frame() attaches on the first frame anyway. Call
+        this to map the ring up front when the producer is already running. A
+        segment that does not exist yet is not an error — it means the producer
+        hasn't started, which is a normal thing for a consumer to see."""
+        self._ring_for(topic)
+
+    def _ring_for(self, topic):
+        """The ring belongs to the producer, so a consumer that starts first has
+        nothing to attach to. Attach on demand instead — a frame handle arriving
+        is itself proof a producer is up and the segment exists — and return
+        None while it still doesn't, which the caller counts as a drop."""
+        with self._rings_lock:
+            ring = self._rings.get(topic)
+            if ring is not None:
+                return ring
+            from .shm_ring import Ring
+            try:
+                ring = Ring.attach(self._ring_shm_name(topic))
+            except RuntimeError:
+                return None  # no producer yet
+            self._rings[topic] = ring
+            return ring
 
     def publish_frame(self, topic, timestamp_ns, width, height, stride, data):
         """Write `data` into the ring zero-copy and announce it on the broker.
@@ -385,9 +407,11 @@ class Node:
     def subscribe_frame(self, topic, handler):
         """Register handler(meta: FrameMeta, view: memoryview). The view is a
         zero-copy read into shm, released after the handler returns — copy it out
-        to keep it. Attach the ring first, or frames count as drops."""
+        to keep it. The ring is attached on the first frame, so a consumer may
+        start before the producer; frames arriving with no ring anywhere count
+        as drops."""
         def wrapper(payload):
-            ring = self._rings.get(topic)
+            ring = self._ring_for(topic)
             if ring is None:
                 self._frame_drops += 1
                 return

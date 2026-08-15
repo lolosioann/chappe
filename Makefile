@@ -165,7 +165,7 @@ bench_chappe: $(BINDIR)/bench_chappe
 
 # ---- examples --------------------------------------------------------------
 
-$(ALL_EXAMPLES): $(BINDIR)/%: examples/%.cpp $(CLIENT_DEPS) $(SERVER_DEPS) examples/tick.hpp $(BINDIR)/shm_ring.o
+$(ALL_EXAMPLES): $(BINDIR)/%: examples/cpp/%.cpp $(CLIENT_DEPS) $(SERVER_DEPS) examples/cpp/tick.hpp $(BINDIR)/shm_ring.o
 	@mkdir -p $(BINDIR)
 	$(CXX) $(CXXFLAGS) $< $(BINDIR)/shm_ring.o -o $@ -lrt
 

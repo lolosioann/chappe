@@ -231,15 +231,21 @@ producer.publish_frame<FrontCam>(ts, w, h, w, [&](void *dst, size_t n) {
   memcpy(dst, pixels, n);            // decode/render straight into the slot
 });
 
-// consumer
-consumer.attach_frame_ring<FrontCam>();
+// consumer — no attach needed, and startup order doesn't matter
 consumer.subscribe_frame<FrontCam>([](const FrontCam &meta, chappe::ShmSlotView &slot) {
   process(slot.data(), slot.size()); // slot auto-released after handler returns
 });
 ```
 
+The ring belongs to the producer, so a consumer that starts first has nothing to
+attach to. `subscribe_frame` attaches on the first frame instead — the handle
+arriving is proof the segment exists — so consumers and producers can start in
+any order. `attach_frame_ring<T>()` still exists to map it up front when the
+producer is already running; a segment that isn't there yet is not an error.
+
 `publish_frame` returns `false` if every slot is held by a consumer (frame
-dropped); `frame_drops()` counts frames a subscriber couldn't retain.
+dropped); `frame_drops()` counts frames a subscriber couldn't retain — including
+a handle whose ring doesn't exist anywhere.
 
 ### get/set store
 
@@ -390,7 +396,6 @@ agree on a POD and have Python `struct.pack` it.
   ```python
   cam.create_frame_ring("cam/front", w*h, 4)
   cam.publish_frame("cam/front", ts, w, h, w, pixels)          # producer
-  vision.attach_frame_ring("cam/front")
   vision.subscribe_frame("cam/front", lambda meta, view: ...)  # zero-copy view
   ```
 

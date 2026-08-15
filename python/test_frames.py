@@ -59,6 +59,32 @@ def main():
             assert got[0][1] == W
             assert got[-1][2] == 12, got  # last frame's first pixel
 
+        # A consumer that starts before any producer must still work: the ring
+        # only exists once a producer creates it, so attaching up front cannot
+        # succeed. Nothing else on this bus cares about startup order.
+        late = "frametest.late"
+        try:
+            os.unlink("/dev/shm/chappe_" + late)
+        except OSError:
+            pass
+        with Node("late_cons") as cons, Node("late_prod") as prod:
+            cons.connect(sock)
+            seen = []
+            cons.subscribe_frame(late, lambda meta, view: seen.append(bytes(view[:4])))
+            cons.sync()
+
+            prod.connect(sock)                      # producer arrives second
+            prod.create_frame_ring(late, 16, 4)
+            prod.publish_frame(late, 7, 4, 1, 4, b"\xa5" * 16)
+            deadline = time.time() + 3
+            while not seen and time.time() < deadline:
+                time.sleep(0.01)
+            assert seen and seen[0] == b"\xa5" * 4, (seen, cons.frame_drops())
+        try:
+            os.unlink("/dev/shm/chappe_" + late)
+        except OSError:
+            pass
+
         print("python frame self-check OK")
     finally:
         proc.terminate()

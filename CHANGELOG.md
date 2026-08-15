@@ -67,6 +67,14 @@ bridges out to other devices, to Redis and to video.
 - **Producer abandon path** — `shm_ring_abandon_slot` returns an
   acquired-but-unpublished slot to the free pool, so a writer that throws does
   not leak a slot as `WRITING`.
+- **Startup order doesn't matter.** The ring belongs to the producer, so a
+  consumer that starts first has nothing to attach to. `subscribe_frame`
+  attaches on the first frame instead — a handle arriving is proof the segment
+  exists — so the two can start in either order, and a producer can restart
+  under a running consumer. `attach_frame_ring` remains for mapping it up front
+  when the producer is known to be running, and a segment that isn't there yet
+  is not an error. `frame_drops()` still counts a handle whose ring exists
+  nowhere.
 
 ### Cross-device
 

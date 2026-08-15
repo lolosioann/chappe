@@ -204,17 +204,21 @@ public:
                   "frame topic type must derive from chappe::FrameHandle");
     static_assert(Topic<T>::name != nullptr,
                   "frame topic type needs MAKE_TOPIC(T, \"...\")");
+    std::lock_guard<std::mutex> lk(rings_mu_);
     rings_.emplace(Topic<T>::name, chappe::SharedMemoryRing::create(
                                        ring_shm_name<T>(), slot_size, num_slots));
   }
 
+  // Optional: subscribe_frame<T>() attaches on the first frame anyway. Call
+  // this to establish the mapping up front when the producer is already
+  // running. A segment that does not exist yet is not an error — it means the
+  // producer hasn't started, which is a normal thing for a consumer to see.
   template <typename T> void attach_frame_ring() {
     static_assert(std::is_base_of_v<chappe::FrameHandle, T>,
                   "frame topic type must derive from chappe::FrameHandle");
     static_assert(Topic<T>::name != nullptr,
                   "frame topic type needs MAKE_TOPIC(T, \"...\")");
-    rings_.emplace(Topic<T>::name,
-                   chappe::SharedMemoryRing::attach(ring_shm_name<T>()));
+    ring_for(Topic<T>::name);
   }
 
   // Producer publish. `writer(void* data, size_t size)` fills the slot in place
@@ -229,22 +233,28 @@ public:
     static_assert(std::is_trivially_copyable_v<T>,
                   "frame message type must be trivially copyable");
     require_connected();
-    auto it = rings_.find(Topic<T>::name);
-    if (it == rings_.end())
-      throw std::logic_error(std::string("publish_frame: no ring for topic '") +
-                             Topic<T>::name + "'");
+    chappe::SharedMemoryRing *ring;
+    {
+      std::lock_guard<std::mutex> lk(rings_mu_);
+      auto it = rings_.find(Topic<T>::name);
+      if (it == rings_.end())
+        throw std::logic_error(
+            std::string("publish_frame: no ring for topic '") +
+            Topic<T>::name + "' — call create_frame_ring<T>() first");
+      ring = &it->second;
+    }
 
-    auto handle = it->second.acquire_write();
+    auto handle = ring->acquire_write();
     if (!handle.valid)
       return false; // genuinely starved — caller decides to retry or drop
 
     try {
       std::forward<WriterFn>(writer)(handle.data, handle.size);
     } catch (...) {
-      it->second.abandon(handle.idx); // don't leak the slot as WRITING
+      ring->abandon(handle.idx); // don't leak the slot as WRITING
       throw;
     }
-    it->second.publish(handle.idx);
+    ring->publish(handle.idx);
 
     T msg{};
     static_cast<chappe::FrameHandle &>(msg) =
@@ -267,12 +277,12 @@ public:
     std::function<void(const T &)> h =
         [this, key, handler = std::forward<HandlerFn>(handler)](
             const T &fh) mutable {
-          auto it = rings_.find(key);
-          if (it == rings_.end()) {
+          chappe::SharedMemoryRing *ring = ring_for(key);
+          if (!ring) {
             record_frame_drop();
-            return; // no ring attached on this node
+            return; // no ring exists for this topic at all
           }
-          chappe::ShmSlotView view = it->second.retain_latest();
+          chappe::ShmSlotView view = ring->retain_latest();
           if (!view) {
             record_frame_drop();
             return; // nothing ready, or producer already reclaimed it
@@ -382,16 +392,41 @@ public:
   const std::string &name() const { return name_; }
 
 private:
-  template <typename T> static std::string ring_shm_name() {
+  static std::string ring_shm_name(const std::string &topic) {
     // POSIX shm names take a single leading '/'; a '/' inside the name would
     // imply a nonexistent subdir. Topics may be '/'-hierarchical, so map inner
     // '/' to '_'. ponytail: "cam/front" and "cam_front" would collide — don't
     // name two topics that way.
-    std::string s = std::string("/chappe_") + Topic<T>::name;
+    std::string s = "/chappe_" + topic;
     for (size_t i = 1; i < s.size(); i++)
       if (s[i] == '/')
         s[i] = '_';
     return s;
+  }
+
+  template <typename T> static std::string ring_shm_name() {
+    return ring_shm_name(std::string(Topic<T>::name));
+  }
+
+  // The ring belongs to the producer, so a consumer that starts first has
+  // nothing to attach to yet. Attach on demand instead — a frame handle
+  // arriving is itself proof a producer is up and the segment exists — and
+  // return nullptr while it still doesn't, which the caller counts as a drop.
+  // References into an unordered_map stay valid across later inserts, so the
+  // pointer outlives the lock.
+  chappe::SharedMemoryRing *ring_for(const std::string &topic) {
+    std::lock_guard<std::mutex> lk(rings_mu_);
+    auto it = rings_.find(topic);
+    if (it != rings_.end())
+      return &it->second;
+    try {
+      return &rings_
+                  .emplace(topic, chappe::SharedMemoryRing::attach(
+                                      ring_shm_name(topic)))
+                  .first->second;
+    } catch (const std::exception &) {
+      return nullptr; // no producer yet
+    }
   }
 
   void record_frame_drop() noexcept {
@@ -719,6 +754,7 @@ private:
   // rings_ + frame_drops_ before pool_: queued frame tasks touch them as the
   // pool drains during destruction, so they must outlive it.
   std::unordered_map<std::string, chappe::SharedMemoryRing> rings_;
+  std::mutex rings_mu_; // handlers attach lazily, and may run on a pool
   std::unique_ptr<std::atomic<uint64_t>> frame_drops_ =
       std::make_unique<std::atomic<uint64_t>>(0);
   std::unique_ptr<ThreadPool> pool_;

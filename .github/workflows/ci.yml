@@ -83,9 +83,9 @@ jobs:
           make install PREFIX=/tmp/p
           export PKG_CONFIG_PATH=/tmp/p/lib/pkgconfig
           pkg-config --exists --print-errors chappe
-          g++ -std=c++17 -Wall -Wextra examples/keyvalue.cpp \
+          g++ -std=c++17 -Wall -Wextra examples/cpp/keyvalue.cpp \
               $(pkg-config --cflags --libs chappe) -o /tmp/app_pc
-          mkdir -p /tmp/c && cp examples/keyvalue.cpp /tmp/c/app.cpp
+          mkdir -p /tmp/c && cp examples/cpp/keyvalue.cpp /tmp/c/app.cpp
           cat > /tmp/c/CMakeLists.txt <<'EOF'
           cmake_minimum_required(VERSION 3.16)
           project(chappe_consumer CXX)

@@ -21,10 +21,12 @@ using namespace chappe;
 struct FrontCam : chappe::FrameHandle {};
 struct RearCam : chappe::FrameHandle {};
 struct SideCam : chappe::FrameHandle {};
+struct LateCam : chappe::FrameHandle {};
 
 MAKE_TOPIC(FrontCam, "cam.front");
 MAKE_TOPIC(RearCam, "cam.rear");
 MAKE_TOPIC(SideCam, "cam.side");
+MAKE_TOPIC(LateCam, "cam.late");
 
 static void clean(const char *shm) { shm_unlink(shm); }
 
@@ -111,22 +113,26 @@ void test_frame_async() {
   ASSERT_EQ(first_byte.load(), 0xAB);
 }
 
+// A handle whose ring does not exist at all — a stale one, or a producer that
+// published the POD without ever creating a ring. There is nothing to attach
+// to, so it counts as a drop rather than throwing on the reader thread.
 void test_frame_drop_no_ring() {
   clean("/chappe_cam.side");
   auto p = sock_path("side");
   chappe::Server server(p);
   Node producer("prod");
-  Node consumer("cons"); // subscribes but never attaches
+  Node consumer("cons");
   producer.connect(p);
   consumer.connect(p);
-  producer.create_frame_ring<SideCam>(8, 4);
 
   consumer.subscribe_frame<SideCam>(
       [](const SideCam &, chappe::ShmSlotView &) { /* never reached */ });
   consumer.sync();
 
-  producer.publish_frame<SideCam>(
-      1, 1, 1, 1, [](void *d, size_t n) { std::memset(d, 0, n); });
+  // Publish the handle as an ordinary message: no ring is ever created for it.
+  SideCam fh{};
+  fh.timestamp_ns = 1;
+  producer.publish(fh);
 
   ASSERT_TRUE(wait_until([&] { return consumer.frame_drops() == 1; }));
   ASSERT_EQ(consumer.frame_drops(), (uint64_t)1);
@@ -163,7 +169,42 @@ void test_frame_writer_throws_no_leak() {
   ASSERT_TRUE(ok); // ring still usable after five throwing publishes
 }
 
+// A consumer that starts before any producer must still work. The ring only
+// exists once a producer creates it, so attaching up front cannot succeed —
+// nothing else on this bus cares about startup order and frames shouldn't
+// either.
+void test_frame_consumer_before_producer() {
+  clean("/chappe_cam.late");
+  auto p = sock_path("late");
+  chappe::Server server(p);
+
+  Node consumer("consumer");
+  consumer.connect(p);
+  // No ring exists yet, and no attach_frame_ring call — this is the whole point.
+  std::atomic<bool> got{false};
+  std::atomic<uint8_t> first{0};
+  consumer.subscribe_frame<LateCam>(
+      [&](const LateCam &, chappe::ShmSlotView &view) {
+        first.store(static_cast<const uint8_t *>(view.data())[0]);
+        got.store(true);
+      });
+  consumer.sync();
+
+  // Producer shows up second, as it would after a reboot or a restart.
+  Node producer("producer");
+  producer.connect(p);
+  producer.create_frame_ring<LateCam>(64, 4);
+  ASSERT_TRUE(producer.publish_frame<LateCam>(
+      99, 8, 1, 8, [](void *d, size_t n) { std::memset(d, 0x5A, n); }));
+
+  ASSERT_TRUE(wait_until([&] { return got.load(); }));
+  ASSERT_EQ((int)first.load(), 0x5A);
+  clean("/chappe_cam.late");
+}
+
 int main() {
+  test_case("a consumer that starts before the producer still gets frames",
+            test_frame_consumer_before_producer);
   test_case("frame sync publish/subscribe", test_frame_sync);
   test_case("frame async (threadpool)", test_frame_async);
   test_case("frame drop when no ring attached", test_frame_drop_no_ring);
