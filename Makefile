@@ -201,7 +201,7 @@ install: $(BINDIR)/chappe_daemon $(BINDIR)/chappe_link $(BINDIR)/libshm_ring.so
 	           $(DESTDIR)$(PREFIX)/lib/cmake/chappe
 	install -m 755 $(BINDIR)/chappe_daemon  $(DESTDIR)$(PREFIX)/bin/
 	install -m 755 $(BINDIR)/chappe_link    $(DESTDIR)$(PREFIX)/bin/
-	install -m 644 $(BINDIR)/libshm_ring.so $(DESTDIR)$(PREFIX)/lib/
+	install -m 755 $(BINDIR)/libshm_ring.so $(DESTDIR)$(PREFIX)/lib/
 	install -m 644 $(PUB_HEADERS)           $(DESTDIR)$(PREFIX)/include/chappe/
 	install -m 644 include/ipc/*.hpp        $(DESTDIR)$(PREFIX)/include/chappe/ipc/
 	install -m 644 python/chappe/*.py       $(DESTDIR)$(PREFIX)/lib/chappe/python/chappe/
@@ -210,7 +210,7 @@ install: $(BINDIR)/chappe_daemon $(BINDIR)/chappe_link $(BINDIR)/libshm_ring.so
 	                                        $(DESTDIR)$(PREFIX)/lib/cmake/chappe/
 	@echo "installed chappe $(VERSION) to $(DESTDIR)$(PREFIX)"
 	@echo "  C++:    pkg-config --cflags --libs chappe   (or find_package(chappe))"
-	@echo "  Python: export PYTHONPATH=$(PREFIX)/lib/chappe/python   (or pip install chappe)"
+	@echo "  Python: export PYTHONPATH=$(PREFIX)/lib/chappe/python   (or pip install .)"
 	@echo "  daemon: $(PREFIX)/bin/chappe_daemon"
 
 uninstall:
@@ -222,6 +222,11 @@ uninstall:
 	rm -rf $(DESTDIR)$(PREFIX)/include/chappe
 	rm -rf $(DESTDIR)$(PREFIX)/lib/chappe
 	@echo "uninstalled from $(DESTDIR)$(PREFIX)"
+	@# install.sh registers the unit, not this target — so only point at it.
+	@[ -f /etc/systemd/system/chappe.service ] && printf '%s\n' \
+	  "  note: the systemd unit is still registered. to drop it:" \
+	  "    sudo systemctl disable --now chappe.service" \
+	  "    sudo rm /etc/systemd/system/chappe.service" || true
 
 # ---- clean -----------------------------------------------------------------
 

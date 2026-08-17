@@ -1,3 +1,9 @@
+![Chappe Logo](/home/lolosioann/Downloads/chappe_logo.svg)
+
+<p align="center">
+    <em>The all in one Robotics broker</em>
+</p>
+
 # chappe
 
 A small central message broker for C++17, IPC-first — think MQTT pub/sub +

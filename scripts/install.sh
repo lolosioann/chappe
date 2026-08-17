@@ -7,12 +7,12 @@
 # pkg-config file and a CMake package config, then registers a systemd unit so
 # the daemon comes up at boot.
 #
-# The Python client is not here: `pip install chappe` handles it, and the wheel
-# builds its own copy of the ring.
+# The Python client is not here: `pip install git+https://github.com/<repo>`
+# handles it, and the wheel builds its own copy of the ring.
 #
 # Knobs (all optional):
 #   PREFIX=/usr/local        where to install
-#   CHAPPE_REF=v1.0.0        version to build; defaults to the latest release
+#   CHAPPE_REF=v1.0.0        tag or branch to build; defaults to main
 #   CHAPPE_USER=someone      uid the daemon runs as; see the note below
 #   CHAPPE_SOCKET=/tmp/chappe.sock   listen address
 #   SYSTEMD_DIR=/etc/systemd/system  where the unit goes
@@ -23,8 +23,12 @@ REPO=lolosioann/chappe
 PREFIX=${PREFIX:-/usr/local}
 SOCKET=${CHAPPE_SOCKET:-/tmp/chappe.sock}
 SYSTEMD_DIR=${SYSTEMD_DIR:-/etc/systemd/system}
+# No releases tagged yet, so main is the only thing there is to install. Pin a
+# tag with CHAPPE_REF once one exists.
+CHAPPE_REF=${CHAPPE_REF:-main}
 WANT_SYSTEMD=yes
-[ "${1:-}" = "--no-systemd" ] && WANT_SYSTEMD=no
+SKIP_WHY=
+if [ "${1:-}" = "--no-systemd" ]; then WANT_SYSTEMD=no; SKIP_WHY="--no-systemd"; fi
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
@@ -52,26 +56,18 @@ RUN_USER=${CHAPPE_USER:-${SUDO_USER:-$(id -un)}}
 id "$RUN_USER" >/dev/null 2>&1 || die "no such user: $RUN_USER"
 
 # ---- fetch -----------------------------------------------------------------
-if [ -z "${CHAPPE_REF:-}" ]; then
-  CHAPPE_REF=$(curl -sSL "https://api.github.com/repos/$REPO/releases/latest" |
-               sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)
-  # Deliberately not falling back to main: installing an unreleased tree from a
-  # transient network error is exactly the surprise an installer must not spring.
-  [ -n "$CHAPPE_REF" ] || die "could not resolve the latest release; set CHAPPE_REF=vX.Y.Z"
-fi
-
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
 say "chappe $CHAPPE_REF -> $PREFIX"
-# A tag normally, but a branch works too, so you can install unreleased work
-# without hand-building. -f so a 404 is a failed download rather than an HTML
-# error page piped into tar.
+# A branch by default, but a tag works too, so CHAPPE_REF can pin a release the
+# day there is one. -f so a 404 is a failed download rather than an HTML error
+# page piped into tar.
 curl -fsSL -o "$TMP/src.tar.gz" \
-     "https://github.com/$REPO/archive/refs/tags/$CHAPPE_REF.tar.gz" 2>/dev/null ||
+     "https://github.com/$REPO/archive/refs/heads/$CHAPPE_REF.tar.gz" 2>/dev/null ||
   curl -fsSL -o "$TMP/src.tar.gz" \
-       "https://github.com/$REPO/archive/refs/heads/$CHAPPE_REF.tar.gz" ||
-  die "could not download $CHAPPE_REF — no such tag or branch"
+       "https://github.com/$REPO/archive/refs/tags/$CHAPPE_REF.tar.gz" ||
+  die "could not download $CHAPPE_REF — no such branch or tag"
 tar xzf "$TMP/src.tar.gz" -C "$TMP" || die "could not unpack $CHAPPE_REF"
 SRC=$(find "$TMP" -maxdepth 1 -type d -name 'chappe-*' | head -1)
 [ -n "$SRC" ] || die "unexpected archive layout"
@@ -82,9 +78,17 @@ make -C "$SRC" -s daemon link libshm_ring
 $SUDO make -C "$SRC" -s install "PREFIX=$PREFIX"
 
 # ---- systemd ---------------------------------------------------------------
+# A prefix inside $HOME needs no sudo to install into, but the unit still lands
+# in /etc. Skip it and say so rather than aborting an install that has already
+# succeeded in every other respect.
+if [ "$WANT_SYSTEMD" = yes ] && [ -z "$SUDO" ] && [ ! -w "$SYSTEMD_DIR" ]; then
+  WANT_SYSTEMD=no
+  SKIP_WHY="$SYSTEMD_DIR is not writable — re-run under sudo to register it"
+fi
+
 if [ "$WANT_SYSTEMD" = no ]; then
   say ""
-  say "installed. skipped systemd (--no-systemd); start it yourself with:"
+  say "installed. skipped systemd ($SKIP_WHY); start it yourself with:"
   say "  $PREFIX/bin/chappe_daemon $SOCKET"
   exit 0
 fi
@@ -127,7 +131,7 @@ say "  daemon:  $PREFIX/bin/chappe_daemon on $SOCKET"
 say "  link:    $PREFIX/bin/chappe_link"
 say "  C++:     g++ app.cpp \$(pkg-config --cflags --libs chappe)"
 say "           or find_package(chappe) in CMake"
-say "  Python:  pip install chappe"
+say "  Python:  pip install git+https://github.com/$REPO"
 say ""
 say "  running as user '$RUN_USER' — the socket is 0600 and checked with"
 say "  SO_PEERCRED, so nodes must run as that user too."

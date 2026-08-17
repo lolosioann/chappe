@@ -48,8 +48,3 @@ include = ["chappe*"]
 # version literal per language (see chappe::VERSION and the Makefile's VERSION).
 [tool.setuptools.dynamic]
 version = { attr = "chappe.__version__" }
-
-[tool.uv.workspace]
-members = [
-    "examples/python",
-]

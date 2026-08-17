@@ -7,4 +7,7 @@ Description: Typed same-host IPC message bus - pub/sub, kv, zero-copy shm frames
 URL: https://github.com/lolosioann/chappe
 Version: @VERSION@
 Cflags: -I${includedir} -pthread
-Libs: -L${libdir} -lshm_ring -lrt
+# -rpath, not just -L: libdir is almost never on the default linker path
+# (/usr/local/lib isn't, on most distros), so without it an app links fine and
+# then dies at exec with "libshm_ring.so: cannot open shared object file".
+Libs: -L${libdir} -Wl,-rpath,${libdir} -lshm_ring -lrt
