@@ -1,4 +1,4 @@
-![Chappe Logo](/home/lolosioann/Downloads/chappe_logo.svg)
+![Chappe Logo](assets/chappe_logo.svg)
 
 <p align="center">
     <em>The all in one Robotics broker</em>
